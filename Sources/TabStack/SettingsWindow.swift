@@ -354,7 +354,7 @@ private struct GeneralSettings: View {
 
             Section("Claude") {
                 Toggle("显示 Claude 标签时切换到工作区对应的会话", isOn: $syncClaudeSession)
-                Text("Claude 的窗口可以同时放进多个工作区。默认按项目文件夹找最近的 Claude Code 会话；在标签上右键 →「Claude 会话」可以固定某一个。")
+                Text("Claude 的窗口可以同时放进多个工作区。离开工作区时记住 Claude 正在看的会话，回来时重新打开它；第一次进入时按项目文件夹找最近的 Claude Code 会话。在标签上右键 →「Claude 会话」也可以直接换一个。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

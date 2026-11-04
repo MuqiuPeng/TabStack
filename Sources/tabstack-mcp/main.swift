@@ -58,7 +58,7 @@ let tools: [[String: Any]] = [
         "color": ["type": "integer", "description": "Palette index 0-7."],
         "pinned": ["type": "boolean"],
         "position": ["type": "integer", "description": "1-based position in the workspace list."],
-        "claudeSession": ["type": "string", "description": "Claude desktop Code session id (local_…) the workspace's Claude tab shows; empty string picks the latest session in the project's folder."],
+        "claudeSession": ["type": "string", "description": "Claude desktop Code session id (local_…) the workspace's Claude tab reopens (it is also updated to whatever Claude shows when the workspace is left); empty string picks the latest session in the project's folder."],
      ], required: ["workspace"])],
     ["name": "delete_workspace",
      "description": "Delete a workspace (only its tab list; windows and apps stay open). Cannot be undone.",

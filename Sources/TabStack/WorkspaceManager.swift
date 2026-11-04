@@ -70,7 +70,8 @@ struct Workspace: Identifiable, Codable, Equatable {
     var pinned: Bool?
     /// When it was used (seconds since 1970), newest last; feeds the frecency ranking.
     var usage: [Double]?
-    /// Claude Code session (local_…) its Claude tab shows; nil picks one by project folder.
+    /// Claude Code session (local_…) Claude showed when this workspace was last left, shown
+    /// again on return; nil until then (a session is picked by project folder).
     var claudeSession: String?
 }
 
@@ -415,6 +416,7 @@ final class WorkspaceManager: ObservableObject {
         let leftID = currentWorkspaceID
         if let d = swapDisplay { otherDisplays[d] = DisplayState(workspace: leftID, tab: currentID) }
 
+        rememberClaudeSession(leaving: leftID)
         let keep = Set(next.tabs.map(\.bundleID)).union(appsOnOtherDisplays)
         let leaving = Array(Set(tabs.map(\.bundleID)).subtracting(keep))
         currentWorkspaceID = id
@@ -1248,6 +1250,7 @@ final class WorkspaceManager: ObservableObject {
               let bundleID = app.bundleIdentifier,
               let w = AX.focusedWindow(pid: pid), let wid = AX.windowID(w)
         else { return }
+        if bundleID == ClaudeSessions.bundleID { claudeVisited = currentWorkspaceID }
         // Working in a window on another display moves the focus (hotkeys, menus) there.
         if let d = display(ofWindow: wid, w) { focusDisplay(d) }
         guard tabs.contains(where: { $0.bundleID == bundleID }) else { return }
@@ -1634,6 +1637,34 @@ final class WorkspaceManager: ObservableObject {
     /// The session TabStack last sent Claude to, trusted over Claude's own record for a few
     /// seconds (Claude writes which session has focus with a delay).
     private var claudeSent: (id: String, at: Date)?
+    /// The workspace in which Claude was last shown; only that one may record Claude's
+    /// session when it is left (elsewhere Claude still shows another workspace's session).
+    private var claudeVisited: UUID?
+
+    /// What Claude shows now: the newer of what TabStack sent and Claude's own record.
+    private static func shownSession(_ sessions: [ClaudeSessions.Session], sent: (id: String, at: Date)?) -> String? {
+        let own = ClaudeSessions.focused(in: sessions)
+        guard let sent else { return own?.id }
+        guard let own else { return sent.id }
+        return own.lastFocused / 1000 > sent.at.timeIntervalSince1970 ? own.id : sent.id
+    }
+
+    /// Leaving a workspace whose Claude tab was in use: remember the session Claude shows,
+    /// to bring it back on return.
+    private func rememberClaudeSession(leaving id: UUID) {
+        guard ClaudeSessions.syncEnabled, claudeVisited == id,
+              workspaces.first(where: { $0.id == id })?.tabs.contains(where: { $0.bundleID == ClaudeSessions.bundleID }) == true
+        else { return }
+        claudeVisited = nil
+        let sent = claudeSent
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let shown = Self.shownSession(ClaudeSessions.all(), sent: sent) else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.workspaces.first(where: { $0.id == id })?.claudeSession != shown else { return }
+                self.update(id) { $0.claudeSession = shown }
+            }
+        }
+    }
 
     /// When the Claude window is about to show (alone or as half of a pair), switches Claude
     /// to the current workspace's session.
@@ -1643,16 +1674,18 @@ final class WorkspaceManager: ObservableObject {
         guard tab.bundleID == claude || (isWide(focusedDisplay) && partner(of: tab)?.bundleID == claude),
               runningApp(claude) != nil else { return }
         let ws = currentWorkspace
-        let sent = claudeSent.flatMap { Date().timeIntervalSince($0.at) < 5 ? $0.id : nil }
+        claudeVisited = ws.id
+        let sent = claudeSent
         DispatchQueue.global(qos: .userInitiated).async {
             let sessions = ClaudeSessions.all()
-            let shown = sent ?? ClaudeSessions.focused(in: sessions)?.id
+            let shown = Self.shownSession(sessions, sent: sent)
             let target: String?
-            if let chosen = ws.claudeSession, sessions.contains(where: { $0.id == chosen }) {
-                target = chosen
+            if let last = ws.claudeSession, sessions.contains(where: { $0.id == last }) {
+                target = last // where Claude was when this workspace was left
             } else {
+                // Never left with Claude in use: the project's latest session, unless
+                // Claude already shows one of the project's sessions.
                 let matches = ClaudeSessions.matching(ws, in: sessions)
-                // Already on one of this project's sessions: leave it there.
                 target = matches.contains { $0.id == shown } ? nil : matches.first?.id
             }
             guard let target, target != shown else { return }
