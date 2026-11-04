@@ -157,7 +157,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard sidebarVisible, panel.isVisible else { showWorkspaceHUD(); return }
         if !manager.expanded {
             manager.expanded = true
-            resizePanel(to: Layout.expandedWidth)
+            let maxWidth = (panel.screen ?? NSScreen.screens.first)?.visibleFrame.width ?? 1200
+            resizePanel(to: Layout.expandedWidth(columns: manager.workspaces.count, maxWidth: maxWidth * 0.9))
         }
         scheduleCollapse(after: 1.4)
     }

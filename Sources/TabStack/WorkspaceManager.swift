@@ -61,8 +61,16 @@ struct Workspace: Identifiable, Codable, Equatable {
 
 enum Layout {
     static let sidebarWidth: CGFloat = 64
-    /// Width while the sidebar shows the workspace list.
-    static let expandedWidth: CGFloat = 248
+    static let columnSpacing: CGFloat = 4
+    static let columnPadding: CGFloat = 4
+
+    /// Width while the sidebar shows every workspace as a column, capped to the screen
+    /// (beyond that the columns scroll).
+    static func expandedWidth(columns: Int, maxWidth: CGFloat) -> CGFloat {
+        let n = CGFloat(max(columns, 1))
+        let full = n * sidebarWidth + (n - 1) * columnSpacing + 2 * columnPadding
+        return min(full, maxWidth)
+    }
 }
 
 /// A running app and its windows, for the "add" menu.
@@ -223,8 +231,13 @@ final class WorkspaceManager: ObservableObject {
 
     // MARK: Switching workspaces
 
-    func switchWorkspace(_ id: UUID) {
-        guard id != currentWorkspaceID, let next = workspaces.first(where: { $0.id == id }) else { return }
+    /// Switches workspace; `tabID` picks the tab to show there instead of the last one used.
+    func switchWorkspace(_ id: UUID, to tabID: UUID? = nil) {
+        if id == currentWorkspaceID {
+            if let tab = tabs.first(where: { $0.id == tabID }) { select(tab) }
+            return
+        }
+        guard let next = workspaces.first(where: { $0.id == id }) else { return }
         let from = workspaces.firstIndex { $0.id == currentWorkspaceID } ?? 0
         let to = workspaces.firstIndex { $0.id == id } ?? 0
         workspaceDirection = to >= from ? 1 : -1
@@ -235,7 +248,8 @@ final class WorkspaceManager: ObservableObject {
         currentID = nil
         save()
 
-        if let target = next.tabs.first(where: { $0.id == next.lastTabID }) ?? next.tabs.first {
+        if let target = next.tabs.first(where: { $0.id == tabID })
+            ?? next.tabs.first(where: { $0.id == next.lastTabID }) ?? next.tabs.first {
             select(target, alsoHide: leaving)
         } else {
             // Empty workspace: nothing to show, just put the old set away.

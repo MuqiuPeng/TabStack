@@ -382,8 +382,7 @@ struct SidebarRoot: View {
     var body: some View {
         ZStack(alignment: .leading) {
             if manager.expanded {
-                ExpandedWorkspaceList(manager: manager)
-                    .frame(width: Layout.expandedWidth)
+                WorkspaceColumns(manager: manager)
                     .transition(.opacity)
             } else {
                 SidebarView(manager: manager)
@@ -398,41 +397,30 @@ struct SidebarRoot: View {
     }
 }
 
-struct ExpandedWorkspaceList: View {
+/// Every workspace as its own column, side by side — the narrow sidebar repeated for
+/// each workspace, so ⌃⌥←/→ visibly moves left and right between them.
+struct WorkspaceColumns: View {
     @ObservedObject var manager: WorkspaceManager
     @Namespace private var ns
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("工作区")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-
-            ScrollViewReader { proxy in
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 2) {
-                        ForEach(Array(manager.workspaces.enumerated()), id: \.element.id) { i, ws in
-                            WorkspaceRow(manager: manager, workspace: ws, index: i,
-                                         current: ws.id == manager.currentWorkspaceID, ns: ns)
-                                .id(ws.id)
-                        }
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: Layout.columnSpacing) {
+                    ForEach(Array(manager.workspaces.enumerated()), id: \.element.id) { i, ws in
+                        WorkspaceColumn(manager: manager, workspace: ws, index: i,
+                                        current: ws.id == manager.currentWorkspaceID, ns: ns)
+                            .id(ws.id)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
                 }
-                .onAppear { proxy.scrollTo(manager.currentWorkspaceID, anchor: .center) }
-                .onChange(of: manager.currentWorkspaceID) { id in
-                    withAnimation(Motion.page) { proxy.scrollTo(id, anchor: .center) }
-                }
+                .padding(.horizontal, Layout.columnPadding)
+                .padding(.vertical, 8)
+                .frame(maxHeight: .infinity, alignment: .top)
             }
-
-            Text("⌃⌥ ← →  切换工作区")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
+            .onAppear { proxy.scrollTo(manager.currentWorkspaceID, anchor: .center) }
+            .onChange(of: manager.currentWorkspaceID) { id in
+                withAnimation(Motion.page) { proxy.scrollTo(id, anchor: .center) }
+            }
         }
         .animation(Motion.reduce ? .easeInOut(duration: 0.12) : Motion.selection, value: manager.currentWorkspaceID)
         .overlay(alignment: .trailing) {
@@ -441,7 +429,7 @@ struct ExpandedWorkspaceList: View {
     }
 }
 
-private struct WorkspaceRow: View {
+private struct WorkspaceColumn: View {
     @ObservedObject var manager: WorkspaceManager
     let workspace: Workspace
     let index: Int
@@ -450,58 +438,66 @@ private struct WorkspaceRow: View {
     @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 10) {
-            Text(String(workspace.name.prefix(1)).uppercased())
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(.white)
-                .frame(width: 30, height: 30)
-                .background(RoundedRectangle(cornerRadius: 8).fill(WorkspaceColor.color(at: index)))
-                .scaleEffect(current && !Motion.reduce ? 1.06 : 1)
-
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(spacing: 6) {
+            VStack(spacing: 3) {
+                Text(String(workspace.name.prefix(1)).uppercased())
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(width: 34, height: 34)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(WorkspaceColor.color(at: index)))
+                    .scaleEffect(current && !Motion.reduce ? 1.08 : 1)
                 Text(workspace.name)
-                    .font(.system(size: 13, weight: current ? .semibold : .regular))
-                    .foregroundColor(current ? .primary : .primary.opacity(0.8))
+                    .font(.system(size: 9, weight: current ? .semibold : .regular))
+                    .foregroundColor(current ? .primary : .secondary)
                     .lineLimit(1)
-                HStack(spacing: 3) {
-                    ForEach(workspace.tabs.prefix(6)) { tab in
-                        Image(nsImage: manager.icon(for: tab.bundleID))
-                            .resizable()
-                            .frame(width: 14, height: 14)
-                    }
-                    if workspace.tabs.count > 6 {
-                        Text("+\(workspace.tabs.count - 6)")
-                            .font(.system(size: 9))
-                            .foregroundColor(.secondary)
-                    }
+                    .frame(width: Layout.sidebarWidth - 8)
+                Text(index < 9 ? "⌃⌥\(index + 1)" : " ")
+                    .font(.system(size: 8, design: .rounded))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.top, 6)
+
+            Rectangle().fill(Color.primary.opacity(0.12)).frame(width: 28, height: 1)
+
+            ForEach(workspace.tabs) { tab in
+                Button { manager.switchWorkspace(workspace.id, to: tab.id) } label: {
+                    Image(nsImage: manager.icon(for: tab.bundleID))
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 30, height: 30)
+                        .opacity(manager.isAvailable(tab) ? 1 : 0.45)
+                        .frame(width: 44, height: 38)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.primary.opacity(tab.id == workspace.lastTabID ? 0.12 : 0))
+                        )
                 }
+                .buttonStyle(PressStyle())
+                .help(tab.displayName)
             }
 
             Spacer(minLength: 0)
-
-            if index < 9 {
-                Text("⌃⌥\(index + 1)")
-                    .font(.system(size: 10, design: .rounded))
-                    .foregroundColor(.secondary)
-            }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
+        .frame(width: Layout.sidebarWidth)
+        .frame(maxHeight: .infinity, alignment: .top)
         .background {
             ZStack {
                 if hovering && !current {
-                    RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.07))
+                    RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.06))
                 }
                 if current {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.accentColor.opacity(0.25))
-                        .matchedGeometryEffect(id: "workspace-selection", in: ns)
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.accentColor.opacity(0.22))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.accentColor.opacity(0.5), lineWidth: 1))
+                        .matchedGeometryEffect(id: "workspace-column", in: ns)
                 }
             }
         }
+        .opacity(current ? 1 : 0.72)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { manager.switchWorkspace(workspace.id) }
         .animation(Motion.press, value: hovering)
+        .help("\(workspace.name)（点击切换）")
     }
 }
