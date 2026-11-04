@@ -8,9 +8,11 @@ final class SidebarPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panel: SidebarPanel!
     private var manager: WorkspaceManager!
+    /// Menu bar icon: the always-available way back when the sidebar is hidden.
+    private var statusItem: NSStatusItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         manager = WorkspaceManager()
@@ -32,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         manager.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         dock()
         panel.orderFrontRegardless()
+        setUpStatusItem()
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
@@ -75,6 +78,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            manager.runningApp(tab.bundleID) != nil, AX.isTrusted {
             manager.select(tab)
         }
+    }
+
+    /// Opening TabStack again (Finder, Spotlight, Launchpad) brings the sidebar back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if userHidden { toggleSidebar() }
+        return false
+    }
+
+    // MARK: Menu bar item
+
+    private func setUpStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "TabStack")
+        image?.isTemplate = true
+        statusItem.button?.image = image
+        statusItem.button?.toolTip = "TabStack"
+        let menu = NSMenu()
+        menu.delegate = self
+        statusItem.menu = menu
+    }
+
+    /// Rebuilt every time it opens, so it always reflects the current state.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        menu.autoenablesItems = false
+
+        let toggle = ClosureMenuItem(userHidden ? "显示侧边栏" : "隐藏侧边栏") { [weak self] in self?.toggleSidebar() }
+        toggle.keyEquivalent = "0"
+        toggle.keyEquivalentModifierMask = [.command, .option]
+        menu.addItem(toggle)
+        menu.addItem(.separator())
+
+        let header = NSMenuItem(title: "工作区", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        for (i, ws) in manager.workspaces.enumerated() {
+            let item = ClosureMenuItem(ws.name) { [weak self] in
+                self?.manager.switchWorkspace(ws.id)
+            }
+            item.state = ws.id == manager.currentWorkspaceID ? .on : .off
+            if i < 9 {
+                item.keyEquivalent = "\(i + 1)"
+                item.keyEquivalentModifierMask = [.control, .option]
+            }
+            menu.addItem(item)
+        }
+        menu.addItem(ClosureMenuItem("新建工作区…") { [weak self] in self?.manager.newWorkspace() })
+        menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem("辅助功能设置…") { AX.openSettings() })
+        menu.addItem(ClosureMenuItem("退出 TabStack") { NSApp.terminate(nil) })
     }
 
     func applicationWillTerminate(_ notification: Notification) {
