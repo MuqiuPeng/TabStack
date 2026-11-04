@@ -60,6 +60,16 @@ enum NewWindow {
         }
     }
 
+    /// Sends ⌘⇧G (Go ▸ Go to Folder…) to Finder.
+    static func showGoToFolder(pid: pid_t) {
+        let g = CGKeyCode(5) // kVK_ANSI_G
+        for down in [true, false] {
+            let e = CGEvent(keyboardEventSource: nil, virtualKey: g, keyDown: down)
+            e?.flags = [.maskCommand, .maskShift]
+            e?.postToPid(pid)
+        }
+    }
+
     /// Asks the app for a new window. Returns false if it could not even be asked.
     @discardableResult
     static func open(_ target: NewWindowTarget) -> Bool {
@@ -75,27 +85,23 @@ enum NewWindow {
             return (try? p.run()) != nil
         }
 
-        // A terminal that is not running opens its first window by itself on launch.
-        if !running && target.bundleID != "com.apple.finder" {
+        // A terminal or Safari that is not running opens its first window by itself.
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: target.bundleID).first,
+              running else {
             NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
             return true
         }
-        let script: String
-        switch target.bundleID {
-        case "com.apple.finder":
-            script = "tell application \"Finder\"\nmake new Finder window to home\nactivate\nend tell"
-        case "com.apple.Terminal":
-            script = "tell application \"Terminal\"\ndo script \"\"\nactivate\nend tell"
-        case "com.googlecode.iterm2":
-            script = "tell application \"iTerm\"\ncreate window with default profile\nactivate\nend tell"
-        case "com.apple.Safari":
-            script = "tell application \"Safari\"\nmake new document\nactivate\nend tell"
-        default:
-            return false
+        // ⌘N (File ▸ New Window) works in every one of these apps and needs only the
+        // Accessibility permission TabStack already has, so no Automation prompt.
+        AX.activate(app)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            let n = CGKeyCode(45) // kVK_ANSI_N
+            for down in [true, false] {
+                let e = CGEvent(keyboardEventSource: nil, virtualKey: n, keyDown: down)
+                e?.flags = .maskCommand
+                e?.postToPid(app.processIdentifier)
+            }
         }
-        var error: NSDictionary?
-        NSAppleScript(source: script)?.executeAndReturnError(&error)
-        if let error { debugLog("new \(target.name) window failed: \(error)"); return false }
         return true
     }
 }

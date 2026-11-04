@@ -6,6 +6,8 @@ import Carbon
 ///   ⌥⌘0         show / hide the sidebar
 ///   ⌃⌥↑ / ⌃⌥↓   previous / next app in the current workspace
 ///   ⌃⌥← / ⌃⌥→   previous / next workspace
+///   ⌃⌥F         search workspaces (also the ones the sidebar does not show)
+///   ⌃⌥D         close the focused window and remove its tab
 /// ⌘1–9 alone is avoided because browsers and editors use it for their own tabs, and
 /// ⌘-arrows because they are the system-wide text navigation keys.
 enum HotKeys {
@@ -15,6 +17,8 @@ enum HotKeys {
         case toggleSidebar
         case cycleTab(Int)
         case cycleWorkspace(Int)
+        case search
+        case closeWindow
     }
 
     static var handler: ((Action) -> Void)?
@@ -23,7 +27,7 @@ enum HotKeys {
     private static let digits = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5,
                                  kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9]
 
-    // Hotkey ids: 1–9 tabs, 101–109 workspaces, 200 toggle, 301–304 arrows.
+    // Hotkey ids: 1–9 tabs, 101–109 workspaces, 200 toggle, 301–304 arrows, 401 search, 402 close.
     private static func action(for id: UInt32) -> Action? {
         switch id {
         case 1...9: return .tab(Int(id) - 1)
@@ -33,6 +37,8 @@ enum HotKeys {
         case 302: return .cycleTab(1)
         case 303: return .cycleWorkspace(-1)
         case 304: return .cycleWorkspace(1)
+        case 401: return .search
+        case 402: return .closeWindow
         default: return nil
         }
     }
@@ -58,6 +64,8 @@ enum HotKeys {
         add(key: kVK_DownArrow, modifiers: arrows, id: 302)
         add(key: kVK_LeftArrow, modifiers: arrows, id: 303)
         add(key: kVK_RightArrow, modifiers: arrows, id: 304)
+        add(key: kVK_ANSI_F, modifiers: arrows, id: 401)
+        add(key: kVK_ANSI_D, modifiers: arrows, id: 402)
     }
 
     private static func add(key: Int, modifiers: Int, id: UInt32) {

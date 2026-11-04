@@ -23,7 +23,7 @@
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>TabStack 读取浏览器窗口里的标签页网址以便重启后恢复，并在你选择“新建窗口”时让 Finder、终端或浏览器打开新窗口。</string>
+    <string>TabStack 读取浏览器窗口里的标签页网址，以便在重启后恢复这些窗口。</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSPrincipalClass</key>

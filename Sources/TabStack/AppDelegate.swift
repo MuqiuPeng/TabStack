@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Menu bar icon: the always-available way back when the sidebar is hidden.
     private var statusItem: NSStatusItem!
     private lazy var settings = SettingsWindowController(manager: manager)
+    private lazy var search = WorkspaceSearchController(manager: manager)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         manager = WorkspaceManager()
@@ -34,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         manager.panel = panel
         manager.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         manager.onOpenSettings = { [weak self] id in self?.settings.show(workspace: id) }
+        manager.onSearch = { [weak self] in self?.search.show() }
         buildMainMenu()
         dock()
         panel.orderFrontRegardless()
@@ -72,6 +74,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             case .cycleWorkspace(let offset):
                 if self.manager.cycleWorkspace(offset) != nil { self.flashWorkspaceList() }
+            case .search:
+                self.search.toggle()
+            case .closeWindow:
+                self.manager.closeFocusedWindow()
             }
         }
         HotKeys.register()
@@ -155,17 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let header = NSMenuItem(title: "工作区", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
-        for (i, ws) in manager.workspaces.enumerated() {
-            let item = ClosureMenuItem(ws.name) { [weak self] in
-                self?.manager.switchWorkspace(ws.id)
-            }
-            item.state = ws.id == manager.currentWorkspaceID ? .on : .off
-            if i < 9 {
-                item.keyEquivalent = "\(i + 1)"
-                item.keyEquivalentModifierMask = [.control, .option]
-            }
-            menu.addItem(item)
-        }
+        WorkspaceMenuItems.add(to: menu, manager: manager)
         menu.addItem(ClosureMenuItem("新建工作区…") { [weak self] in self?.manager.newWorkspace() })
         let settingsItem = ClosureMenuItem("工作区设置…") { [weak self] in self?.settings.show() }
         settingsItem.keyEquivalent = ","
@@ -201,7 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !manager.expanded {
             manager.expanded = true
             let maxWidth = (panel.screen ?? NSScreen.screens.first)?.visibleFrame.width ?? 1200
-            resizePanel(to: Layout.expandedWidth(columns: manager.workspaces.count, maxWidth: maxWidth * 0.9))
+            resizePanel(to: Layout.expandedWidth(columns: manager.activeWorkspaces.count, maxWidth: maxWidth * 0.9))
         }
         scheduleCollapse(after: 1.4)
     }
@@ -239,9 +235,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func showWorkspaceHUD() {
         let ws = manager.currentWorkspace
-        let index = manager.workspaces.firstIndex(of: ws) ?? 0
+        let index = manager.activeWorkspaces.firstIndex(of: ws) ?? 0
         HUD.shared.show(title: ws.name,
-                        subtitle: "工作区 \(index + 1) / \(manager.workspaces.count)",
+                        subtitle: "工作区 \(index + 1) / \(manager.activeWorkspaces.count)",
                         color: WorkspaceColor.color(for: ws, fallback: index))
     }
 

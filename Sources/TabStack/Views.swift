@@ -4,6 +4,43 @@ import AppKit
 struct SidebarView: View {
     @ObservedObject var manager: WorkspaceManager
     @Namespace private var selectionNS
+    @State private var dragging: UUID?
+    @State private var dragY: CGFloat = 0
+    @State private var dragStartMid: CGFloat = 0
+    /// Where the dragged tab's slot is now (it moves as the others make room).
+    @State private var draggedMid: CGFloat = 0
+    @State private var draggedHeight: CGFloat = 46
+    @State private var rowFrames: [UUID: CGRect] = [:]
+
+    /// Drag a tab up or down to reorder; a plain click still selects it.
+    private func reorderGesture(_ tab: AppTab) -> some Gesture {
+        DragGesture(minimumDistance: 6, coordinateSpace: .named("tabColumn"))
+            .onChanged { v in
+                if dragging != tab.id {
+                    let f = rowFrames[tab.id] ?? CGRect(x: 0, y: v.startLocation.y - 23, width: 52, height: 46)
+                    dragging = tab.id
+                    dragStartMid = f.midY
+                    draggedMid = f.midY
+                    draggedHeight = f.height
+                }
+                dragY = v.translation.height
+                let y = dragStartMid + dragY
+                guard let i = manager.tabs.firstIndex(of: tab) else { return }
+                // Swap with a neighbor once the pointer crosses that neighbor's middle.
+                var j = i
+                while j + 1 < manager.tabs.count, let f = rowFrames[manager.tabs[j + 1].id], y > f.midY { j += 1 }
+                if j == i {
+                    while j - 1 >= 0, let f = rowFrames[manager.tabs[j - 1].id], y < f.midY { j -= 1 }
+                }
+                guard j != i, let f = rowFrames[manager.tabs[j].id] else { return }
+                draggedMid = j > i ? f.maxY - draggedHeight / 2 : f.minY + draggedHeight / 2
+                withAnimation(Motion.selection) { manager.moveTab(tab.id, onto: manager.tabs[j].id) }
+            }
+            .onEnded { _ in
+                withAnimation(Motion.selection) { dragging = nil; dragY = 0 }
+            }
+    }
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -47,13 +84,26 @@ struct SidebarView: View {
     private var tabColumn: some View {
         VStack(spacing: 6) {
             ForEach(Array(manager.tabs.enumerated()), id: \.element.id) { index, tab in
+                let isDragged = dragging == tab.id
                 TabButton(manager: manager, tab: tab, index: index,
                           selectionNS: selectionNS, reduceMotion: reduceMotion)
+                    .background(GeometryReader { g in
+                        Color.clear.preference(key: RowFrameKey.self, value: [tab.id: g.frame(in: .named("tabColumn"))])
+                    })
+                    // The dragged tab follows the pointer; the others slide into the gap.
+                    .scaleEffect(isDragged ? 1.08 : 1)
+                    .shadow(color: .black.opacity(isDragged ? 0.3 : 0), radius: 6, y: 2)
+                    .offset(y: isDragged ? dragStartMid + dragY - draggedMid : 0)
+                    .zIndex(isDragged ? 1 : 0)
                     .transition(reduceMotion ? .opacity : .scale(scale: 0.6).combined(with: .opacity))
+                    .highPriorityGesture(reorderGesture(tab))
             }
             AddMenu(manager: manager)
         }
         .padding(.vertical, 4)
+        .coordinateSpace(name: "tabColumn")
+        .onPreferenceChange(RowFrameKey.self) { rowFrames = $0 }
+        .onChange(of: manager.currentWorkspaceID) { _ in dragging = nil }
         .frame(maxWidth: .infinity)
         .animation(reduceMotion ? .easeInOut(duration: 0.12) : Motion.selection, value: manager.currentID)
         .animation(Motion.selection, value: manager.tabs)
@@ -67,6 +117,13 @@ struct SidebarView: View {
         return .asymmetric(
             insertion: .offset(y: dy).combined(with: .opacity),
             removal: .scale(scale: 0.96).combined(with: .opacity))
+    }
+}
+
+private struct RowFrameKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { $1 }
     }
 }
 
@@ -129,15 +186,7 @@ struct WorkspaceMenu: View {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        for (i, ws) in m.workspaces.enumerated() {
-            let item = ClosureMenuItem(ws.name) { m.switchWorkspace(ws.id) }
-            item.state = ws.id == current.id ? .on : .off
-            if i < 9 {
-                item.keyEquivalent = "\(i + 1)"
-                item.keyEquivalentModifierMask = [.control, .option]
-            }
-            menu.addItem(item)
-        }
+        WorkspaceMenuItems.add(to: menu, manager: m)
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem("新建工作区…") { m.newWorkspace() })
         menu.addItem(ClosureMenuItem("工作区设置…") { m.onOpenSettings?(current.id) })
@@ -156,6 +205,34 @@ struct WorkspaceMenu: View {
         menu.addItem(ClosureMenuItem("退出 TabStack") { NSApp.terminate(nil) })
 
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+}
+
+/// The shown workspaces with their ⌃⌥ numbers, then the stored ones in a submenu and a
+/// search entry. Shared by the sidebar's workspace menu and the menu-bar menu.
+enum WorkspaceMenuItems {
+    static func add(to menu: NSMenu, manager m: WorkspaceManager) {
+        for (i, ws) in m.activeWorkspaces.enumerated() {
+            let item = ClosureMenuItem(ws.name) { m.switchWorkspace(ws.id) }
+            item.state = ws.id == m.currentWorkspaceID ? .on : .off
+            if i < 9 {
+                item.keyEquivalent = "\(i + 1)"
+                item.keyEquivalentModifierMask = [.control, .option]
+            }
+            menu.addItem(item)
+        }
+        let stored = m.storedWorkspaces
+        if !stored.isEmpty {
+            let more = NSMenuItem(title: "其他工作区（\(stored.count)）", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for ws in stored { sub.addItem(ClosureMenuItem(ws.name) { m.switchWorkspace(ws.id) }) }
+            more.submenu = sub
+            menu.addItem(more)
+        }
+        let search = ClosureMenuItem("搜索工作区…") { m.onSearch?() }
+        search.keyEquivalent = "f"
+        search.keyEquivalentModifierMask = [.control, .option]
+        menu.addItem(search)
     }
 }
 
@@ -450,7 +527,7 @@ struct WorkspaceColumns: View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: Layout.columnSpacing) {
-                    ForEach(Array(manager.workspaces.enumerated()), id: \.element.id) { i, ws in
+                    ForEach(Array(manager.activeWorkspaces.enumerated()), id: \.element.id) { i, ws in
                         WorkspaceColumn(manager: manager, workspace: ws, index: i,
                                         current: ws.id == manager.currentWorkspaceID, ns: ns)
                             .id(ws.id)

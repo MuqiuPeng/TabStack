@@ -62,6 +62,60 @@ struct Workspace: Identifiable, Codable, Equatable {
     var lastTabID: UUID?
     /// Index into WorkspaceColor.palette. Stored, so reordering keeps each color.
     var color: Int?
+    /// Always among the workspaces the sidebar shows.
+    var pinned: Bool?
+    /// When it was used (seconds since 1970), newest last; feeds the frecency ranking.
+    var usage: [Double]?
+}
+
+/// Which workspaces the sidebar shows: only a few are kept at hand, the rest stay saved and
+/// are reached through search (⌃⌥F). The choice is "frecency", as browsers rank their
+/// address-bar suggestions: every use counts, and its weight halves every few days.
+enum Frecency {
+    static let halfLife: Double = 3 * 24 * 3600
+    static let keep = 60
+    /// While you stay in a workspace, another use is counted this often.
+    static let dwellInterval: Double = 10 * 60
+
+    static var limit: Int {
+        let n = UserDefaults.standard.integer(forKey: "activeWorkspaceLimit")
+        return n > 0 ? n : 5
+    }
+
+    static func score(_ ws: Workspace, now: Double = Date().timeIntervalSince1970) -> Double {
+        (ws.usage ?? []).reduce(0) { $0 + pow(0.5, max(0, now - $1) / halfLife) }
+    }
+
+    /// How well `query` names a workspace: 0 = no match. Prefix beats word start beats
+    /// substring beats letters in order; a tab title match counts a little.
+    static func match(_ query: String, _ ws: Workspace) -> Double {
+        let q = query.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return 1 }
+        let name = ws.name.lowercased()
+        if name == q { return 10 }
+        if name.hasPrefix(q) { return 8 }
+        if name.components(separatedBy: CharacterSet.alphanumerics.inverted).contains(where: { $0.hasPrefix(q) }) { return 6 }
+        if name.contains(q) { return 5 }
+        if let gaps = subsequenceGaps(q, in: name) { return max(1, 4 - Double(gaps) * 0.3) }
+        if ws.tabs.contains(where: { $0.displayName.lowercased().contains(q) || $0.name.lowercased().contains(q) }) { return 1.5 }
+        return 0
+    }
+
+    /// Letters of `q` appear in order in `s`; returns how many letters were skipped between them.
+    private static func subsequenceGaps(_ q: String, in s: String) -> Int? {
+        var gaps = 0, started = false
+        var it = s.makeIterator()
+        for c in q {
+            var found = false
+            while let x = it.next() {
+                if x == c { found = true; break }
+                if started { gaps += 1 }
+            }
+            if !found { return nil }
+            started = true
+        }
+        return gaps
+    }
 }
 
 enum Layout {
@@ -103,6 +157,8 @@ final class WorkspaceManager: ObservableObject {
     var onToggleSidebar: (() -> Void)?
     /// Opens the settings window, optionally on a workspace. Set by the app delegate.
     var onOpenSettings: ((UUID?) -> Void)?
+    /// Opens the workspace search (⌃⌥F). Set by the app delegate.
+    var onSearch: (() -> Void)?
     /// Whether the user wants the sidebar (⌥⌘0). It may still be hidden temporarily
     /// while a full-screen app is in front; layout follows this flag, not visibility.
     var sidebarShown = true
@@ -139,6 +195,95 @@ final class WorkspaceManager: ObservableObject {
 
     var currentWorkspace: Workspace {
         workspaces.first { $0.id == currentWorkspaceID } ?? workspaces[0]
+    }
+
+    // MARK: Shown workspaces
+
+    /// The workspaces the sidebar, hotkeys and menus show (in the user's order). Chosen
+    /// only at switches, so the list never shuffles while you are just working.
+    @Published private(set) var activeIDs: Set<UUID> = []
+
+    var activeWorkspaces: [Workspace] { workspaces.filter { activeIDs.contains($0.id) } }
+    var storedWorkspaces: [Workspace] { workspaces.filter { !activeIDs.contains($0.id) } }
+
+    /// Current + pinned first, then the highest frecency, up to the limit.
+    func recomputeActive() {
+        let now = Date().timeIntervalSince1970
+        var chosen: [UUID] = [currentWorkspaceID]
+        for ws in workspaces where ws.pinned == true && !chosen.contains(ws.id) { chosen.append(ws.id) }
+        let ranked = workspaces.enumerated()
+            .filter { !chosen.contains($0.element.id) }
+            .sorted { a, b in
+                let sa = Frecency.score(a.element, now: now), sb = Frecency.score(b.element, now: now)
+                return sa != sb ? sa > sb : a.offset < b.offset
+            }
+        for (_, ws) in ranked where chosen.count < Frecency.limit { chosen.append(ws.id) }
+        let set = Set(chosen)
+        if set != activeIDs { activeIDs = set }
+    }
+
+    private func recordUse(_ id: UUID) {
+        let now = Date().timeIntervalSince1970
+        guard let i = workspaces.firstIndex(where: { $0.id == id }) else { return }
+        var usage = workspaces[i].usage ?? []
+        usage.append(now)
+        if usage.count > Frecency.keep { usage.removeFirst(usage.count - Frecency.keep) }
+        workspaces[i].usage = usage
+        save()
+    }
+
+    func setPinned(_ id: UUID, _ pinned: Bool) {
+        update(id) { $0.pinned = pinned ? true : nil }
+        recomputeActive()
+    }
+
+    /// Search results: with no query, every workspace by frecency (the recommendation);
+    /// otherwise by how well the name matches, weighted by frecency.
+    func searchWorkspaces(_ query: String) -> [Workspace] {
+        let now = Date().timeIntervalSince1970
+        return workspaces.enumerated()
+            .map { (ws: $0.element, offset: $0.offset, match: Frecency.match(query, $0.element),
+                    frecency: Frecency.score($0.element, now: now)) }
+            .filter { $0.match > 0 }
+            .sorted { a, b in
+                let sa = a.match * (1 + log1p(a.frecency)), sb = b.match * (1 + log1p(b.frecency))
+                return sa != sb ? sa > sb : a.offset < b.offset
+            }
+            .map(\.ws)
+    }
+
+    // MARK: Closing a window (⌃⌥D)
+
+    /// Closes the focused window and removes every tab bound to it; then, like closing a
+    /// browser tab, shows the neighboring tab.
+    func closeFocusedWindow() {
+        guard AX.isTrusted else { AX.requestTrust(); return }
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.bundleIdentifier != Bundle.main.bundleIdentifier,
+              let w = AX.focusedWindow(pid: app.processIdentifier) else { NSSound.beep(); return }
+        let title = AX.title(w)
+        var next: AppTab?
+        if let id = AX.windowID(w) {
+            if let i = tabs.firstIndex(where: { $0.windowID == id }), tabs[i].id == currentID, tabs.count > 1 {
+                next = i + 1 < tabs.count ? tabs[i + 1] : tabs[i - 1]
+            }
+            for ws in workspaces {
+                for tab in ws.tabs where tab.windowID == id { removeTab(tab.id, from: ws.id) }
+            }
+        }
+        guard AX.close(w) else { NSSound.beep(); return }
+        HUD.shared.show(title: "已关闭", subtitle: title.isEmpty ? app.localizedName : title,
+                        icon: app.bundleIdentifier.map { icon(for: $0) })
+        if let next { after(0.3) { [weak self] in self?.select(next) } }
+    }
+
+    /// Drag-to-reorder in the sidebar: puts `tabID` where `targetID` is.
+    func moveTab(_ tabID: UUID, onto targetID: UUID) {
+        updateCurrent { ws in
+            guard let from = ws.tabs.firstIndex(where: { $0.id == tabID }),
+                  let to = ws.tabs.firstIndex(where: { $0.id == targetID }), from != to else { return }
+            ws.tabs.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        }
     }
 
     var tabs: [AppTab] { currentWorkspace.tabs }
@@ -227,9 +372,10 @@ final class WorkspaceManager: ObservableObject {
     /// Moves to the previous (-1) or next (+1) workspace, wrapping around.
     @discardableResult
     func cycleWorkspace(_ offset: Int) -> Workspace? {
-        guard workspaces.count > 1,
-              let i = workspaces.firstIndex(where: { $0.id == currentWorkspaceID }) else { return nil }
-        let ws = workspaces[wrap(i + offset, workspaces.count)]
+        let shown = activeWorkspaces
+        guard shown.count > 1,
+              let i = shown.firstIndex(where: { $0.id == currentWorkspaceID }) else { return nil }
+        let ws = shown[wrap(i + offset, shown.count)]
         switchWorkspace(ws.id)
         return ws
     }
@@ -253,6 +399,8 @@ final class WorkspaceManager: ObservableObject {
         let leaving = Array(Set(tabs.map(\.bundleID)).subtracting(keep))
         currentWorkspaceID = id
         currentID = nil
+        recordUse(id)
+        recomputeActive()
         save()
 
         if let target = next.tabs.first(where: { $0.id == tabID })
@@ -268,8 +416,9 @@ final class WorkspaceManager: ObservableObject {
     }
 
     func switchWorkspace(index: Int) {
-        guard workspaces.indices.contains(index) else { return }
-        switchWorkspace(workspaces[index].id)
+        let shown = activeWorkspaces
+        guard shown.indices.contains(index) else { return }
+        switchWorkspace(shown[index].id)
     }
 
     func newWorkspace() {
@@ -292,6 +441,7 @@ final class WorkspaceManager: ObservableObject {
         switchWorkspace(fallback)
         workspaces.removeAll { $0.id == removed }
         save()
+        recomputeActive()
         syncWatcher()
     }
 
@@ -776,8 +926,10 @@ final class WorkspaceManager: ObservableObject {
         let used = Set(workspaces.compactMap(\.color))
         ws.color = (0..<WorkspaceColor.palette.count).first { !used.contains($0) }
             ?? workspaces.count % WorkspaceColor.palette.count
+        ws.usage = [Date().timeIntervalSince1970]
         workspaces.append(ws)
         save()
+        recomputeActive()
         return ws.id
     }
 
@@ -804,6 +956,7 @@ final class WorkspaceManager: ObservableObject {
         }
         workspaces.removeAll { $0.id == id }
         save()
+        recomputeActive()
         syncWatcher()
     }
 
@@ -877,6 +1030,10 @@ final class WorkspaceManager: ObservableObject {
                        return !before.contains(id)
                    }), let id = AX.windowID(w) {
                     self.addWindow(id, title: AX.title(w), of: app, to: workspaceID)
+                    if target.bundleID == "com.apple.finder" {
+                        // A new Finder window opens on 前往文件夹 so you can type where to go.
+                        self.after(0.6) { NewWindow.showGoToFolder(pid: app.processIdentifier) }
+                    }
                     return
                 }
                 if Date() < deadline { poll() } else {
@@ -1026,6 +1183,9 @@ final class WorkspaceManager: ObservableObject {
             syncWatcher()
         }
         refreshLiveWindows()
+        if let last = currentWorkspace.usage?.last,
+           Date().timeIntervalSince1970 - last > Frecency.dwellInterval { recordUse(currentWorkspaceID) }
+        else if currentWorkspace.usage == nil { recordUse(currentWorkspaceID) }
         guard t else { return }
         bindUnboundTabs()
         refreshTitles()
@@ -1062,6 +1222,7 @@ final class WorkspaceManager: ObservableObject {
             workspaces[i].color = i % WorkspaceColor.palette.count
         }
         save() // persists ids given to tabs migrated from the app-level format
+        recomputeActive()
     }
 
     private func save() {

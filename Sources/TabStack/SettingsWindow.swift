@@ -62,9 +62,16 @@ struct SettingsView: View {
                             Text(ws.name.isEmpty ? "未命名" : ws.name)
                                 .lineLimit(1)
                             Spacer()
+                            if ws.pinned == true {
+                                Image(systemName: "pin.fill").font(.caption2).foregroundColor(.secondary)
+                                    .help("固定显示在侧边栏")
+                            }
                             if ws.id == manager.currentWorkspaceID {
                                 Circle().fill(Color.accentColor).frame(width: 6, height: 6)
                                     .help("当前工作区")
+                            } else if !manager.activeIDs.contains(ws.id) {
+                                Text("已收起").font(.caption2).foregroundColor(.secondary)
+                                    .help("不在侧边栏显示，用 ⌃⌥F 搜索打开")
                             }
                             Text("\(ws.tabs.count)")
                                 .font(.caption)
@@ -175,11 +182,20 @@ private struct WorkspaceDetail: View {
                         } else {
                             Button("切换到此工作区") { manager.switchWorkspace(ws.id) }
                         }
-                        if index < 9 {
-                            Text("快捷键 ⌃⌥\(index + 1)")
+                        if let shown = manager.activeWorkspaces.firstIndex(where: { $0.id == workspaceID }) {
+                            Text(shown < 9 ? "侧边栏第 \(shown + 1) 个 · ⌃⌥\(shown + 1)" : "侧边栏第 \(shown + 1) 个")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("已收起 · 用 ⌃⌥F 搜索打开")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
+                        Toggle("固定显示在侧边栏", isOn: Binding(
+                            get: { ws.pinned == true },
+                            set: { manager.setPinned(workspaceID, $0) }))
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
                     }
                 }
 
@@ -300,12 +316,22 @@ private struct GeneralSettings: View {
     @ObservedObject var manager: WorkspaceManager
     @AppStorage("switchAnimation") private var curtain = true
     @AppStorage("restoreOnSwitch") private var restoreOnSwitch = true
+    @AppStorage("activeWorkspaceLimit") private var limit = 5
 
     var body: some View {
         Form {
             Section("切换") {
                 Toggle("切换窗口时显示磨砂过渡", isOn: $curtain)
                 Text("系统开启“减弱动态效果”时，所有动画会改为淡入淡出。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("侧边栏") {
+                Stepper("最多显示 \(limit) 个工作区", value: Binding(
+                    get: { limit },
+                    set: { limit = $0; manager.recomputeActive() }), in: 2...9)
+                Text("当前工作区和固定的工作区总会显示，其余按使用频率和最近使用时间推荐：每次使用都计分，分数每 3 天减半，停留越久分越高。没显示的工作区不会删除，用 ⌃⌥F 搜索即可打开。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -330,8 +356,10 @@ private struct GeneralSettings: View {
             Section("快捷键") {
                 ShortcutRow(keys: "⌥⌘1 … 9", action: "切换到当前工作区的第 1–9 个窗口")
                 ShortcutRow(keys: "⌃⌥↑ / ↓", action: "上一个 / 下一个窗口")
-                ShortcutRow(keys: "⌃⌥1 … 9", action: "切换到第 1–9 个工作区")
+                ShortcutRow(keys: "⌃⌥1 … 9", action: "切换到侧边栏的第 1–9 个工作区")
                 ShortcutRow(keys: "⌃⌥← / →", action: "上一个 / 下一个工作区（展开工作区总览）")
+                ShortcutRow(keys: "⌃⌥F", action: "搜索工作区（包括已收起的）")
+                ShortcutRow(keys: "⌃⌥D", action: "关闭当前窗口并从列表移除")
                 ShortcutRow(keys: "⌥⌘0", action: "显示 / 隐藏侧边栏")
             }
         }

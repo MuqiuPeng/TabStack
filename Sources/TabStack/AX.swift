@@ -187,3 +187,14 @@ enum AX {
         return result
     }
 }
+
+extension AX {
+    /// Presses the window's close button, as clicking the red light would.
+    @discardableResult
+    static func close(_ w: AXUIElement) -> Bool {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(w, kAXCloseButtonAttribute as CFString, &value) == .success,
+              let button = value, CFGetTypeID(button) == AXUIElementGetTypeID() else { return false }
+        return AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString) == .success
+    }
+}
