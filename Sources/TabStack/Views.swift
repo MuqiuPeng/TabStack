@@ -325,6 +325,40 @@ enum WindowPicker {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
+        // Fresh windows of interchangeable apps (Finder, terminals, browsers).
+        let fresh = NSMenuItem(title: "新建窗口", action: nil, keyEquivalent: "")
+        fresh.isEnabled = false
+        menu.addItem(fresh)
+        for app in NewWindow.apps() {
+            let icon = m.icon(for: app.bundleID).copy() as! NSImage
+            icon.size = NSSize(width: 16, height: 16)
+            let title = "新建\(app.name)窗口"
+            if app.targets.count == 1, let target = app.targets.first {
+                let item = ClosureMenuItem(title) { m.createWindow(target, in: workspaceID) }
+                item.image = icon
+                item.indentationLevel = 1
+                menu.addItem(item)
+            } else {
+                // Browser with several profiles: pick which account the window opens in.
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.image = icon
+                item.indentationLevel = 1
+                let sub = NSMenu()
+                for target in app.targets {
+                    sub.addItem(ClosureMenuItem(target.profile?.label ?? app.name) {
+                        m.createWindow(target, in: workspaceID)
+                    })
+                }
+                item.submenu = sub
+                menu.addItem(item)
+            }
+        }
+        menu.addItem(.separator())
+
+        let existing = NSMenuItem(title: "已打开的窗口", action: nil, keyEquivalent: "")
+        existing.isEnabled = false
+        menu.addItem(existing)
+
         let apps = m.addableApps()
         if apps.isEmpty {
             let none = NSMenuItem(title: "没有可添加的窗口", action: nil, keyEquivalent: "")

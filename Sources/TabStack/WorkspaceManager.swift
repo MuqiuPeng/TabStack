@@ -495,8 +495,16 @@ final class WorkspaceManager: ObservableObject {
     /// by prefix; the longest title wins.
     private func browserEntry(forWindowTitle axTitle: String,
                               in cache: [(title: String, urls: [String])]) -> (title: String, urls: [String])? {
-        cache.filter { !$0.title.isEmpty && axTitle.hasPrefix($0.title) }
-            .max { $0.title.count < $1.title.count }
+        if let hit = cache.filter({ !$0.title.isEmpty && axTitle.hasPrefix($0.title) })
+            .max(by: { $0.title.count < $1.title.count }) { return hit }
+        // A page that failed to load has no title; Chrome then titles the window with its
+        // address minus the scheme.
+        return cache.first { entry in
+            entry.title.isEmpty && entry.urls.contains { url in
+                let bare = url.replacingOccurrences(of: "^[a-z]+://", with: "", options: .regularExpression)
+                return !bare.isEmpty && axTitle.trimmingCharacters(in: .whitespaces).hasPrefix(bare)
+            }
+        }
     }
 
     /// Records, for every bound tab, how to reopen its window later.
@@ -845,6 +853,38 @@ final class WorkspaceManager: ObservableObject {
         }
         liveWindowIDs.insert(id)
         syncWatcher()
+    }
+
+    /// Opens a fresh window of a Finder/terminal/browser app and adds it to `workspaceID`
+    /// once it appears.
+    func createWindow(_ target: NewWindowTarget, in workspaceID: UUID) {
+        let windowIDs = { (bundleID: String) -> Set<CGWindowID> in
+            guard let app = self.runningApp(bundleID) else { return [] }
+            return Set(AX.windows(pid: app.processIdentifier).compactMap(AX.windowID))
+        }
+        let before = windowIDs(target.bundleID)
+        guard NewWindow.open(target) else {
+            HUD.shared.show(title: "无法新建\(target.name)窗口", icon: icon(for: target.bundleID))
+            return
+        }
+        let deadline = Date().addingTimeInterval(10)
+        func poll() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                guard let self else { return }
+                if let app = self.runningApp(target.bundleID),
+                   let w = AX.windows(pid: app.processIdentifier).first(where: {
+                       guard let id = AX.windowID($0) else { return false }
+                       return !before.contains(id)
+                   }), let id = AX.windowID(w) {
+                    self.addWindow(id, title: AX.title(w), of: app, to: workspaceID)
+                    return
+                }
+                if Date() < deadline { poll() } else {
+                    HUD.shared.show(title: "没有等到新的\(target.name)窗口", icon: self.icon(for: target.bundleID))
+                }
+            }
+        }
+        poll()
     }
 
     func addApp(_ bundleID: String, name: String, to workspaceID: UUID) {
