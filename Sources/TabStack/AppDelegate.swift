@@ -29,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.contentView = NSHostingView(rootView: SidebarView(manager: manager))
+        panel.contentView = NSHostingView(rootView: SidebarRoot(manager: manager))
         manager.panel = panel
         manager.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         dock()
@@ -59,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .tab(let i): self.manager.selectIndex(i)
             case .workspace(let i):
                 self.manager.switchWorkspace(index: i)
-                self.showWorkspaceHUD()
+                self.flashWorkspaceList()
             case .toggleSidebar: self.toggleSidebar()
             case .cycleTab(let offset):
                 if let tab = self.manager.cycleTab(offset) {
@@ -68,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                     icon: self.manager.icon(for: tab.bundleID))
                 }
             case .cycleWorkspace(let offset):
-                if self.manager.cycleWorkspace(offset) != nil { self.showWorkspaceHUD() }
+                if self.manager.cycleWorkspace(offset) != nil { self.flashWorkspaceList() }
             }
         }
         HotKeys.register()
@@ -146,6 +146,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.setFrame(NSRect(x: vf.minX, y: vf.minY, width: Layout.sidebarWidth, height: vf.height), display: true)
     }
 
+    // MARK: Expanded workspace list
+
+    private var collapseWork: DispatchWorkItem?
+
+    /// Widens the sidebar into the workspace list for a moment, so a keyboard switch shows
+    /// where you are among all workspaces. Falls back to the centered HUD when the sidebar
+    /// is hidden.
+    private func flashWorkspaceList() {
+        guard sidebarVisible, panel.isVisible else { showWorkspaceHUD(); return }
+        if !manager.expanded {
+            manager.expanded = true
+            resizePanel(to: Layout.expandedWidth)
+        }
+        scheduleCollapse(after: 1.4)
+    }
+
+    private func scheduleCollapse(after seconds: TimeInterval) {
+        collapseWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.collapseIfIdle() }
+        collapseWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    /// Stays open while the mouse is over it, so a row can be clicked.
+    private func collapseIfIdle() {
+        if manager.hoveringSidebar { scheduleCollapse(after: 0.6); return }
+        collapseList(animated: true)
+    }
+
+    private func collapseList(animated: Bool) {
+        collapseWork?.cancel()
+        guard manager.expanded else { return }
+        manager.expanded = false
+        resizePanel(to: Layout.sidebarWidth, animated: animated)
+    }
+
+    private func resizePanel(to width: CGFloat, animated: Bool = true) {
+        var frame = panel.frame
+        frame.size.width = width
+        guard animated, !Motion.reduce else { panel.setFrame(frame, display: true); return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.24
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+            panel.animator().setFrame(frame, display: true)
+        }
+    }
+
     private func showWorkspaceHUD() {
         let ws = manager.currentWorkspace
         let index = manager.workspaces.firstIndex(of: ws) ?? 0
@@ -178,6 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func setSidebar(visible: Bool, animated: Bool) {
         guard visible != sidebarVisible else { return }
         sidebarVisible = visible
+        if !visible { collapseList(animated: false) }
         guard let screen = NSScreen.screens.first else { return }
         let vf = screen.visibleFrame
         let docked = NSRect(x: vf.minX, y: vf.minY, width: Layout.sidebarWidth, height: vf.height)

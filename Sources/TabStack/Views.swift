@@ -371,3 +371,137 @@ struct VisualEffect: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
+
+// MARK: Expanded workspace list
+
+/// Root of the sidebar panel: the narrow tab column, or — briefly, while switching
+/// workspaces from the keyboard — a wider list of every workspace.
+struct SidebarRoot: View {
+    @ObservedObject var manager: WorkspaceManager
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if manager.expanded {
+                ExpandedWorkspaceList(manager: manager)
+                    .frame(width: Layout.expandedWidth)
+                    .transition(.opacity)
+            } else {
+                SidebarView(manager: manager)
+                    .frame(width: Layout.sidebarWidth)
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background(VisualEffect())
+        .onHover { manager.hoveringSidebar = $0 }
+        .animation(.easeInOut(duration: Motion.reduce ? 0.1 : 0.18), value: manager.expanded)
+    }
+}
+
+struct ExpandedWorkspaceList: View {
+    @ObservedObject var manager: WorkspaceManager
+    @Namespace private var ns
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("工作区")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 2) {
+                        ForEach(Array(manager.workspaces.enumerated()), id: \.element.id) { i, ws in
+                            WorkspaceRow(manager: manager, workspace: ws, index: i,
+                                         current: ws.id == manager.currentWorkspaceID, ns: ns)
+                                .id(ws.id)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                }
+                .onAppear { proxy.scrollTo(manager.currentWorkspaceID, anchor: .center) }
+                .onChange(of: manager.currentWorkspaceID) { id in
+                    withAnimation(Motion.page) { proxy.scrollTo(id, anchor: .center) }
+                }
+            }
+
+            Text("⌃⌥ ← →  切换工作区")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+        }
+        .animation(Motion.reduce ? .easeInOut(duration: 0.12) : Motion.selection, value: manager.currentWorkspaceID)
+        .overlay(alignment: .trailing) {
+            Rectangle().fill(Color.primary.opacity(0.1)).frame(width: 1)
+        }
+    }
+}
+
+private struct WorkspaceRow: View {
+    @ObservedObject var manager: WorkspaceManager
+    let workspace: Workspace
+    let index: Int
+    let current: Bool
+    let ns: Namespace.ID
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(String(workspace.name.prefix(1)).uppercased())
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 30, height: 30)
+                .background(RoundedRectangle(cornerRadius: 8).fill(WorkspaceColor.color(at: index)))
+                .scaleEffect(current && !Motion.reduce ? 1.06 : 1)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(workspace.name)
+                    .font(.system(size: 13, weight: current ? .semibold : .regular))
+                    .foregroundColor(current ? .primary : .primary.opacity(0.8))
+                    .lineLimit(1)
+                HStack(spacing: 3) {
+                    ForEach(workspace.tabs.prefix(6)) { tab in
+                        Image(nsImage: manager.icon(for: tab.bundleID))
+                            .resizable()
+                            .frame(width: 14, height: 14)
+                    }
+                    if workspace.tabs.count > 6 {
+                        Text("+\(workspace.tabs.count - 6)")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            if index < 9 {
+                Text("⌃⌥\(index + 1)")
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background {
+            ZStack {
+                if hovering && !current {
+                    RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.07))
+                }
+                if current {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.accentColor.opacity(0.25))
+                        .matchedGeometryEffect(id: "workspace-selection", in: ns)
+                }
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture { manager.switchWorkspace(workspace.id) }
+        .animation(Motion.press, value: hovering)
+    }
+}

@@ -61,6 +61,8 @@ struct Workspace: Identifiable, Codable, Equatable {
 
 enum Layout {
     static let sidebarWidth: CGFloat = 64
+    /// Width while the sidebar shows the workspace list.
+    static let expandedWidth: CGFloat = 248
 }
 
 /// A running app and its windows, for the "add" menu.
@@ -89,6 +91,10 @@ final class WorkspaceManager: ObservableObject {
     /// Whether the user wants the sidebar (⌥⌘0). It may still be hidden temporarily
     /// while a full-screen app is in front; layout follows this flag, not visibility.
     var sidebarShown = true
+    /// The sidebar is temporarily showing the full workspace list (keyboard switching).
+    @Published var expanded = false
+    /// Mouse is over the sidebar; keeps the expanded list open.
+    var hoveringSidebar = false
 
     private var iconCache: [String: NSImage] = [:]
     private var timer: Timer?
