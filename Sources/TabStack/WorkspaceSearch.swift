@@ -32,6 +32,11 @@ final class WorkspaceSearchController: NSObject, NSWindowDelegate {
             panel.setFrameOrigin(NSPoint(x: vf.midX - size.width / 2, y: vf.maxY - vf.height * 0.22 - size.height))
         }
         panel.makeKeyAndOrderFront(nil)
+        // SwiftUI focus set while the panel was hidden does not stick; put the caret in
+        // the field through AppKit once the panel is key.
+        focusField(in: panel)
+        DispatchQueue.main.async { [weak self] in self?.focusField(in: panel) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.focusField(in: panel) }
 
         if keyMonitor == nil {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
@@ -47,6 +52,20 @@ final class WorkspaceSearchController: NSObject, NSWindowDelegate {
                 }
             }
         }
+    }
+
+    private func focusField(in panel: NSPanel) {
+        guard panel.isVisible else { return }
+        if !panel.isKeyWindow { panel.makeKey() }
+        if let editor = panel.firstResponder as? NSTextView, editor.isFieldEditor { return }
+        if let field = findTextField(panel.contentView) { panel.makeFirstResponder(field) }
+    }
+
+    private func findTextField(_ view: NSView?) -> NSTextField? {
+        guard let view else { return nil }
+        if let field = view as? NSTextField, field.isEditable { return field }
+        for sub in view.subviews { if let f = findTextField(sub) { return f } }
+        return nil
     }
 
     func close() {
