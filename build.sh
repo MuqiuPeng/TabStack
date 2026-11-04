@@ -10,13 +10,20 @@ if [[ -z "${SIGN_IDENTITY:-}" ]] && security find-identity -p codesigning 2>/dev
     SIGN_IDENTITY="TabStack Local Signing"
 fi
 
-swift build -c release
+# UNIVERSAL=1 builds for both Apple silicon and Intel (used for releases).
+if [[ "${UNIVERSAL:-}" == "1" ]]; then
+    swift build -c release --arch arm64 --arch x86_64
+    BIN=.build/apple/Products/Release
+else
+    swift build -c release
+    BIN=.build/release
+fi
 
 APP=build/TabStack.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/TabStack "$APP/Contents/MacOS/TabStack"
-cp .build/release/tabstack-mcp "$APP/Contents/MacOS/tabstack-mcp"
+cp "$BIN/TabStack" "$APP/Contents/MacOS/TabStack"
+cp "$BIN/tabstack-mcp" "$APP/Contents/MacOS/tabstack-mcp"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --sign "${SIGN_IDENTITY:--}" "$APP/Contents/MacOS/tabstack-mcp"
