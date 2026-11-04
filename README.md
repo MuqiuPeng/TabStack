@@ -103,6 +103,11 @@ Other behaviour:
   Recommendation is frecency-based — one point per switch and one per ten
   minutes of use, halved every three days. The others are collapsed, never
   deleted; reach them with `⌃⌥F` or **Other workspaces** in the workspace menu.
+- **Two windows in one tab** on wide displays: right-click a tab → **Show side
+  by side with…** pairs it with another tab of the workspace. On a display at
+  least 2400 points wide (configurable in settings) the pair fills the content
+  area half and half; on narrower ones only the half you last used is shown.
+  Pairing is optional — other tabs keep the whole area.
 - **Several displays**: each display gets its own sidebar and shows its own
   workspace; two displays never show the same one. Hotkeys and menus act on the
   display you last clicked or worked in. Switching to a workspace another

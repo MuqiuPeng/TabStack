@@ -106,17 +106,38 @@ enum AX {
 
     /// Fits a window into `rect` (AX coordinates, top-left origin). Windows that refuse
     /// the size (fixed-size or with a max size) are centered in the rect instead.
-    static func setFrame(_ w: AXUIElement, _ rect: CGRect) {
+    static func setFrame(_ w: AXUIElement, _ rect: CGRect, center: Bool = true) {
         if (attr(w, kAXMinimizedAttribute) as Bool?) == true {
             set(w, kAXMinimizedAttribute, kCFBooleanFalse)
         }
+        // Chromium and Electron apps switch on "enhanced user interface" once an assistive
+        // app talks to them, and then delay or drop window moves. Turn it off while
+        // moving, as other window managers do, and restore it afterwards.
+        var pid: pid_t = 0
+        AXUIElementGetPid(w, &pid)
+        let app = AXUIElementCreateApplication(pid)
+        let enhanced = (attr(app, "AXEnhancedUserInterface") as Bool?) == true
+        if enhanced { set(app, "AXEnhancedUserInterface", kCFBooleanFalse) }
+        defer { if enhanced { set(app, "AXEnhancedUserInterface", kCFBooleanTrue) } }
+
         // Position → size → position: moving first lets the size apply on the target
         // display, the second move corrects any clamping the app did while resizing.
+        var rect = rect
         setPosition(w, rect.origin)
+        // macOS keeps windows below a display's menu bar even when the screen's visible
+        // frame does not account for it; some apps (Chrome) then refuse a size that no
+        // longer fits. Shrink to the space actually left below where the window landed.
+        if let p = position(w), abs(p.x - rect.minX) < 2, p.y > rect.minY + 1, p.y < rect.maxY - 100 {
+            rect.size.height -= p.y - rect.minY
+            rect.origin.y = p.y
+        }
         setSize(w, rect.size)
         setPosition(w, rect.origin)
 
-        if let s = size(w), abs(s.width - rect.width) > 2 || abs(s.height - rect.height) > 2 {
+        // Some apps (Chrome) apply moves a moment later; reading back the old frame then
+        // says nothing about the size, so only center when the move already took.
+        if center, let s = size(w), abs(s.width - rect.width) > 2 || abs(s.height - rect.height) > 2,
+           let p = position(w), abs(p.x - rect.minX) < 2 {
             let origin = CGPoint(x: rect.minX + max(0, (rect.width - s.width) / 2),
                                  y: rect.minY + max(0, (rect.height - s.height) / 2))
             setPosition(w, origin)

@@ -317,6 +317,12 @@ private struct GeneralSettings: View {
     @AppStorage("switchAnimation") private var curtain = true
     @AppStorage("restoreOnSwitch") private var restoreOnSwitch = true
     @AppStorage("activeWorkspaceLimit") private var limit = 5
+    @AppStorage("splitMinWidth") private var splitMinWidth = 2400.0
+
+    private var widthHint: String {
+        let widths = NSScreen.screens.map { "\($0.localizedName) \(Int($0.visibleFrame.width)) 点" }
+        return "在标签上右键选“与…并排显示”，两个窗口会合成一个标签，在足够宽的屏幕上左右各占一半；窄屏幕上只显示其中一个。当前屏幕：" + widths.joined(separator: "，")
+    }
 
     var body: some View {
         Form {
@@ -332,6 +338,15 @@ private struct GeneralSettings: View {
                     get: { limit },
                     set: { limit = $0; manager.recomputeActive() }), in: 2...9)
                 Text("当前工作区和固定的工作区总会显示，其余按使用频率和最近使用时间推荐：每次使用都计分，分数每 3 天减半，停留越久分越高。没显示的工作区不会删除，用 ⌃⌥F 搜索即可打开。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("并排") {
+                Stepper("屏幕宽度达到 \(Int(splitMinWidth)) 点时并排显示", value: Binding(
+                    get: { splitMinWidth },
+                    set: { splitMinWidth = $0; manager.layoutChanged() }), in: 1200...6000, step: 200)
+                Text(widthHint)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

@@ -15,7 +15,7 @@ struct SidebarView: View {
 
     /// This display's workspace (each display's sidebar shows its own).
     private var workspaceID: UUID? { manager.workspaceID(on: display) }
-    private var tabs: [AppTab] { manager.workspace(on: display)?.tabs ?? [] }
+    private var tabs: [AppTab] { manager.workspace(on: display).map(manager.shownTabs) ?? [] }
 
     /// Drag a tab up or down to reorder; a plain click still selects it.
     private func reorderGesture(_ tab: AppTab) -> some Gesture {
@@ -306,12 +306,9 @@ struct TabButton: View {
         // Scoped per workspace so the outgoing and incoming pages never share a highlight.
         let matchID = "selection-\(manager.workspaceID(on: display)?.uuidString ?? "")"
 
-        Button { manager.select(tab) } label: {
+        Button { manager.select(focusSide) } label: {
             VStack(spacing: 2) {
-                Image(nsImage: manager.icon(for: tab.bundleID))
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 34, height: 34)
+                icons
                     .opacity(available ? 1 : 0.45)
                     .saturation(available ? 1 : 0.3)
                     .scaleEffect(hovering && !reduceMotion ? 1.06 : 1)
@@ -374,6 +371,8 @@ struct TabButton: View {
                 Button("绑定到 \(tab.name) 当前窗口") { manager.rebindToFocusedWindow(tab) }
             }
             Divider()
+            pairMenu
+            Divider()
             Button("上移") { manager.move(tab, by: -1) }.disabled(index == 0)
             Button("下移") { manager.move(tab, by: 1) }
                 .disabled(index == (manager.workspace(on: display)?.tabs.count ?? 0) - 1)
@@ -382,10 +381,65 @@ struct TabButton: View {
                 Button("退出 \(tab.name)（所有窗口）") { manager.quit(tab) }
             }
             Button("从工作区移除") { manager.remove(tab) }
+            if let partner { Button("从工作区移除 \(partner.displayName)") { manager.remove(partner) } }
+        }
+    }
+
+    @ViewBuilder private var pairMenu: some View {
+        if partner != nil {
+            Button("交换左右") { manager.swapSides(tab) }
+            Button("取消并排") { manager.unpair(tab) }
+        } else {
+            let others = (manager.workspace(on: display).map(manager.shownTabs) ?? [])
+                .filter { $0.id != tab.id && manager.partner(of: $0) == nil }
+            Menu("与…并排显示") {
+                ForEach(others) { other in
+                    Button(other.displayName) { manager.pair(tab.id, with: other.id) }
+                }
+                if !manager.isWide(display) {
+                    Divider()
+                    Text("这块屏幕不够宽，只会显示其中一个")
+                }
+            }
+            .disabled(others.isEmpty)
+        }
+    }
+
+    /// The other half when this tab is a side-by-side pair.
+    private var partner: AppTab? { manager.partner(of: tab) }
+
+    /// Of a pair, the half that had focus last; clicking the pair returns to it.
+    private var focusSide: AppTab {
+        guard let partner, manager.workspace(on: display)?.lastTabID == partner.id else { return tab }
+        return partner
+    }
+
+    @ViewBuilder private var icons: some View {
+        if let partner {
+            // Two windows side by side: two smaller icons with a split line between.
+            HStack(spacing: 2) {
+                Image(nsImage: manager.icon(for: tab.bundleID)).resizable().interpolation(.high)
+                    .frame(width: 23, height: 23)
+                Rectangle().fill(Color.primary.opacity(0.25)).frame(width: 1, height: 18)
+                Image(nsImage: manager.icon(for: partner.bundleID)).resizable().interpolation(.high)
+                    .frame(width: 23, height: 23)
+            }
+            .frame(height: 34)
+        } else {
+            Image(nsImage: manager.icon(for: tab.bundleID))
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 34, height: 34)
         }
     }
 
     private var tooltip: String {
+        if let partner {
+            var text = "\(tab.displayName)  |  \(partner.displayName)"
+            if !manager.isWide(display) { text += "（屏幕不够宽，只显示其中一个）" }
+            if index < 9 { text += "   ⌥⌘\(index + 1)" }
+            return text
+        }
         var text = tab.name
         if let title = tab.customName ?? tab.title, !title.isEmpty, title != tab.name { text += " — \(title)" }
         if !manager.isBound(tab) {
@@ -624,7 +678,7 @@ private struct WorkspaceColumn: View {
 
             Rectangle().fill(Color.primary.opacity(0.12)).frame(width: 28, height: 1)
 
-            ForEach(workspace.tabs) { tab in
+            ForEach(manager.shownTabs(workspace)) { tab in
                 Button { manager.switchWorkspace(workspace.id, to: tab.id) } label: {
                     Image(nsImage: manager.icon(for: tab.bundleID))
                         .resizable()

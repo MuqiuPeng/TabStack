@@ -187,6 +187,10 @@ final class ControlCommands {
         var d: [String: Any] = ["id": t.id.uuidString, "name": t.displayName, "app": t.name,
                                 "bundleID": t.bundleID, "windowOpen": m.isBound(t)]
         if let w = t.windowID { d["windowID"] = Int(w) }
+        if let p = m.partner(of: t) {
+            d["pairedWith"] = p.id.uuidString
+            d["side"] = m.primary(of: t).id == t.id ? "left" : "right"
+        }
         if let title = t.title { d["windowTitle"] = title }
         if let r = t.reopen, !r.isEmpty {
             var rd: [String: Any] = [:]
@@ -408,6 +412,17 @@ final class ControlCommands {
         if let dest = p["moveTo"] as? String {
             let target = try workspace(dest)
             if target.id != ws.id { m.moveTab(t.id, from: ws.id, to: target.id); ws = target }
+        }
+        if let ref = p["pairWith"] as? String {
+            if ref.isEmpty {
+                m.unpair(t)
+            } else {
+                let (other, ows) = try tab(["tab": ref, "workspace": ws.id.uuidString])
+                guard ows.id == ws.id else { throw Failure("a tab can only be paired with a tab of the same workspace") }
+                if let existing = m.partner(of: t), existing.id != other.id { m.unpair(t) }
+                if let existing = m.partner(of: other), existing.id != t.id { m.unpair(other) }
+                m.pair(t.id, with: other.id)
+            }
         }
         if let pos = p["position"] as? Int, let current = m.workspaces.first(where: { $0.id == ws.id }),
            let from = current.tabs.firstIndex(where: { $0.id == t.id }) {

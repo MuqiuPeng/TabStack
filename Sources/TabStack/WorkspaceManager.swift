@@ -20,6 +20,9 @@ struct AppTab: Identifiable, Codable, Equatable {
     var windowID: CGWindowID?
     /// How to reopen this window after a restart (folder, URLs or file).
     var reopen: Reopen?
+    /// Shown side by side with this tab (same workspace) on a wide display: this one on
+    /// the left, that one on the right. The sidebar shows the pair as one tab.
+    var pairedWith: UUID?
 
     init(bundleID: String, name: String, title: String? = nil, windowID: CGWindowID? = nil) {
         self.id = UUID()
@@ -29,7 +32,7 @@ struct AppTab: Identifiable, Codable, Equatable {
         self.windowID = windowID
     }
 
-    enum CodingKeys: String, CodingKey { case id, bundleID, name, customName, title, windowID, reopen }
+    enum CodingKeys: String, CodingKey { case id, bundleID, name, customName, title, windowID, reopen, pairedWith }
 
     /// Also reads tabs saved by the app-level version (no id / window fields).
     init(from decoder: Decoder) throws {
@@ -41,6 +44,7 @@ struct AppTab: Identifiable, Codable, Equatable {
         title = try c.decodeIfPresent(String.self, forKey: .title)
         windowID = try c.decodeIfPresent(CGWindowID.self, forKey: .windowID)
         reopen = try c.decodeIfPresent(Reopen.self, forKey: .reopen)
+        pairedWith = try c.decodeIfPresent(UUID.self, forKey: .pairedWith)
     }
 
     /// Identity is the tab, not its changing title.
@@ -315,8 +319,8 @@ final class WorkspaceManager: ObservableObject {
     /// Switches to `tab`. `alsoHide` lists extra apps (bundle ids) to hide in the same
     /// motion: the apps of the workspace being left.
     func select(_ tab: AppTab, alsoHide: [String] = []) {
-        currentID = tab.id
-        updateCurrent { $0.lastTabID = tab.id }
+        currentID = primary(of: tab).id
+        updateCurrent { $0.lastTabID = tab.id } // which half of a pair had focus
         guard AX.isTrusted else { AX.requestTrust(); return }
 
         pending = (tab.id, Date().addingTimeInterval(1.2))
@@ -338,7 +342,7 @@ final class WorkspaceManager: ObservableObject {
     }
 
     private func performSwitch(to tab: AppTab, alsoHide: [String]) {
-        guard currentID == tab.id else { return } // superseded by a newer switch
+        guard currentID == primary(of: tab).id else { return } // superseded by a newer switch
 
         // Activate the target *before* hiding the others: hiding the frontmost app makes
         // macOS hand focus to some other app first.
@@ -352,19 +356,23 @@ final class WorkspaceManager: ObservableObject {
 
         // Other apps are hidden. Other tabs of the *same* app can't be hidden one by one;
         // they share the content frame, so the raised window simply covers them.
-        let others = Set(tabs.map(\.bundleID) + alsoHide).subtracting([tab.bundleID])
+        var shown: Set<String> = [tab.bundleID]
+        if isWide(focusedDisplay), let p = partner(of: tab) { shown.insert(p.bundleID) }
+        let others = Set(tabs.map(\.bundleID) + alsoHide).subtracting(shown)
             .subtracting(appsOnOtherDisplays)
         for id in others { runningApp(id)?.hide() }
     }
 
     func selectIndex(_ index: Int) {
-        guard tabs.indices.contains(index) else { return }
-        select(tabs[index])
+        let shown = shownTabs(currentWorkspace)
+        guard shown.indices.contains(index) else { return }
+        select(shown[index])
     }
 
     /// Moves to the previous (-1) or next (+1) tab of the current workspace, wrapping around.
     @discardableResult
     func cycleTab(_ offset: Int) -> AppTab? {
+        let tabs = shownTabs(currentWorkspace)
         guard !tabs.isEmpty else { return nil }
         let i = tabs.firstIndex { $0.id == currentID }
         let next = i.map { wrap($0 + offset, tabs.count) } ?? (offset > 0 ? 0 : tabs.count - 1)
@@ -714,7 +722,10 @@ final class WorkspaceManager: ObservableObject {
     /// Re-fits the current tab after the screen layout changed or the sidebar was toggled.
     func layoutChanged() {
         for (d, state) in otherDisplays { gather(state.workspace, onto: d, raise: state.tab) }
-        guard let tab = currentTab, let app = runningApp(tab.bundleID), !app.isHidden else { return }
+        guard let shown = currentTab else { return }
+        // Of a pair, keep the half that had focus in front.
+        let tab = currentWorkspace.tabs.first { $0.id == currentWorkspace.lastTabID && primary(of: $0).id == shown.id } ?? shown
+        guard let app = runningApp(tab.bundleID), !app.isHidden else { return }
         place(tab)
     }
 
@@ -732,24 +743,29 @@ final class WorkspaceManager: ObservableObject {
         return frame
     }
 
-    private var contentFrameAX: CGRect? { contentFrameCocoa.map(AX.toAX) }
 
     /// Fits the tab's window into the content area and raises it. A window that is gone is
     /// restored from the tab's recipe; apps that are still launching are retried for a while.
     private func place(_ tab: AppTab) {
         placeToken += 1
+        // A pair on a wide display: the other half first, so `tab` ends up focused.
+        if isWide(focusedDisplay), let p = partner(of: tab), runningApp(p.bundleID) != nil {
+            place(tabID: p.id, token: placeToken, attempt: 0, focus: false)
+        }
         place(tabID: tab.id, token: placeToken, attempt: 0)
     }
 
-    private func place(tabID: UUID, token: Int, attempt: Int) {
+    /// `focus` is false for the other half of a pair: raised, but not made the app's main window.
+    private func place(tabID: UUID, token: Int, attempt: Int, focus: Bool = true) {
         guard token == placeToken else { return }
-        guard let tab = allTabs.first(where: { $0.id == tabID }), let frame = contentFrameAX
+        guard let tab = allTabs.first(where: { $0.id == tabID }),
+              let frame = frame(for: tab, on: focusedDisplay).map(AX.toAX)
         else { SwitchCurtain.shared.reveal(); return }
 
         guard let app = runningApp(tab.bundleID), !app.isTerminated else {
             // App still starting from a restore: keep waiting for it.
             if restoring[tabID] != nil, attempt >= 0, attempt < 100 {
-                after(0.15) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1) }
+                after(0.15) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1, focus: focus) }
             } else {
                 SwitchCurtain.shared.reveal()
             }
@@ -761,15 +777,26 @@ final class WorkspaceManager: ObservableObject {
             // A full-screen window lives in its own Space; leave it alone.
             if AX.isFullScreen(w) { SwitchCurtain.shared.reveal(); return }
             app.unhide()
-            AX.setFrame(w, frame)
+            // Passes: 0 (now), -1 and -2 (follow-ups). Some apps (Chrome) apply a move or
+            // resize a moment later and report the old frame until then, so centering a
+            // window that refuses the size waits for the last pass.
+            AX.setFrame(w, frame, center: attempt == -2)
             // Activating an app brings all its windows forward, on every display; put
             // the other displays' own windows back on top first, then this one.
             raiseOtherDisplays()
-            AX.raise(w)
+            if focus {
+                AX.raise(w)
+                // Raising the other half of a pair can hand it the focus; take it back.
+                if attempt < 0, !app.isActive { AX.activate(app) }
+            } else {
+                AXUIElementPerformAction(w, kAXRaiseAction as CFString)
+            }
             if attempt >= 0 {
                 SwitchCurtain.shared.reveal()
-                // A second pass catches apps that reposition themselves while un-hiding.
-                after(0.25) { [weak self] in self?.place(tabID: tabID, token: token, attempt: -1) }
+                // Follow-ups catch apps that reposition themselves while un-hiding.
+                after(0.25) { [weak self] in self?.place(tabID: tabID, token: token, attempt: -1, focus: focus) }
+            } else if attempt == -1 {
+                after(0.3) { [weak self] in self?.place(tabID: tabID, token: token, attempt: -2, focus: focus) }
             }
 
         case .restoring:
@@ -780,7 +807,7 @@ final class WorkspaceManager: ObservableObject {
                                 icon: icon(for: tab.bundleID))
             }
             if AppKind.of(tab.bundleID) == .browser, attempt % 6 == 5 { refreshBrowserCache(tab.bundleID) }
-            after(0.15) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1) }
+            after(0.15) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1, focus: focus) }
 
         case .allClaimed, .unmatched:
             SwitchCurtain.shared.reveal()
@@ -791,7 +818,7 @@ final class WorkspaceManager: ObservableObject {
         case .noWindows:
             guard attempt >= 0, attempt < 40 else { SwitchCurtain.shared.reveal(); return }
             if attempt == 10 { reopen(app) }
-            after(0.1) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1) }
+            after(0.1) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1, focus: focus) }
         }
     }
 
@@ -817,7 +844,7 @@ final class WorkspaceManager: ObservableObject {
         config.activates = true
         NSWorkspace.shared.openApplication(at: url, configuration: config) { app, _ in
             DispatchQueue.main.async { [weak self] in
-                guard let self, app != nil, self.currentID == tab.id else { return }
+                guard let self, app != nil, self.currentID == self.primary(of: tab).id else { return }
                 self.place(tab)
             }
         }
@@ -883,10 +910,9 @@ final class WorkspaceManager: ObservableObject {
     }
 
     func move(_ tab: AppTab, by offset: Int) {
-        updateCurrent { ws in
-            guard let i = ws.tabs.firstIndex(of: tab), ws.tabs.indices.contains(i + offset) else { return }
-            ws.tabs.swapAt(i, i + offset)
-        }
+        let shown = shownTabs(currentWorkspace)
+        guard let i = shown.firstIndex(of: tab), shown.indices.contains(i + offset) else { return }
+        moveTab(tab.id, onto: shown[i + offset].id)
     }
 
     func rename(_ tab: AppTab) {
@@ -1191,15 +1217,20 @@ final class WorkspaceManager: ObservableObject {
         refreshLiveWindows()
 
         if let tab = tabs.first(where: { $0.windowID == wid }) {
-            guard currentID != tab.id else { return }
-            currentID = tab.id
+            let rep = primary(of: tab)
+            guard currentID != rep.id else {
+                // Focus moved within the pair: just remember the side.
+                if currentWorkspace.lastTabID != tab.id { updateCurrent { $0.lastTabID = tab.id } }
+                return
+            }
+            currentID = rep.id
             updateCurrent { $0.lastTabID = tab.id }
             place(tab)
         } else if let tab = tabs.first(where: { $0.bundleID == bundleID && !isBound($0)
                     && (!isRestorable($0) || match($0, among: [w]) != nil) }),
                   !claimedWindowIDs(except: tab.id).contains(wid) {
             bind(tab.id, to: wid, title: AX.title(w))
-            currentID = tab.id
+            currentID = primary(of: tab).id
             updateCurrent { $0.lastTabID = tab.id }
             place(tab)
         }
@@ -1313,6 +1344,90 @@ final class WorkspaceManager: ObservableObject {
             UserDefaults.standard.set(data, forKey: Keys.displays)
         }
         UserDefaults.standard.set(focusedDisplay, forKey: Keys.focusedDisplay)
+    }
+
+    // MARK: Side by side
+
+    /// Displays whose visible area is at least this wide (points) show a paired tab's two
+    /// windows side by side; narrower ones show just the focused half.
+    static var splitMinWidth: CGFloat {
+        CGFloat(UserDefaults.standard.object(forKey: "splitMinWidth") as? Double ?? 2400)
+    }
+
+    func isWide(_ display: DisplayKey) -> Bool {
+        (Displays.screen(display)?.visibleFrame.width ?? 0) >= Self.splitMinWidth
+    }
+
+    private func workspace(containing tabID: UUID) -> Workspace? {
+        workspaces.first { $0.tabs.contains { $0.id == tabID } }
+    }
+
+    /// The other half of a paired tab, if any (always in the same workspace).
+    func partner(of tab: AppTab) -> AppTab? {
+        guard let ws = workspace(containing: tab.id) else { return nil }
+        if let id = tab.pairedWith, id != tab.id, let p = ws.tabs.first(where: { $0.id == id }) { return p }
+        return ws.tabs.first { $0.pairedWith == tab.id && $0.id != tab.id }
+    }
+
+    /// The left half of the pair `tab` is in (the one the sidebar shows), or `tab` itself.
+    func primary(of tab: AppTab) -> AppTab {
+        if tab.pairedWith == nil, let p = partner(of: tab) { return p }
+        return tab
+    }
+
+    /// The workspace's tabs as the sidebar shows them: a pair's right half is folded
+    /// into its left one.
+    func shownTabs(_ ws: Workspace) -> [AppTab] {
+        ws.tabs.filter { t in t.pairedWith != nil || !ws.tabs.contains { $0.pairedWith == t.id && $0.id != t.id } }
+    }
+
+    /// Puts `right` next to `left` (both in the same workspace, neither paired yet).
+    func pair(_ left: UUID, with right: UUID) {
+        guard left != right, let ws = workspace(containing: left),
+              let l = ws.tabs.first(where: { $0.id == left }), let r = ws.tabs.first(where: { $0.id == right }),
+              partner(of: l) == nil, partner(of: r) == nil else { return }
+        update(ws.id) { w in
+            if let i = w.tabs.firstIndex(where: { $0.id == left }) { w.tabs[i].pairedWith = right }
+        }
+        if currentID == right { currentID = left }
+        for d in otherDisplays.keys where otherDisplays[d]?.tab == right { otherDisplays[d]?.tab = left }
+        if ws.id == currentWorkspaceID, currentID == left, let tab = allTabs.first(where: { $0.id == left }) {
+            select(tab)
+        }
+    }
+
+    /// Splits a pair back into two tabs.
+    func unpair(_ tab: AppTab) {
+        let p = primary(of: tab)
+        updateTab(p.id) { $0.pairedWith = nil }
+        layoutChanged()
+    }
+
+    /// Swaps the pair's left and right windows.
+    func swapSides(_ tab: AppTab) {
+        let left = primary(of: tab)
+        guard let right = partner(of: left), let ws = workspace(containing: left.id) else { return }
+        update(ws.id) { w in
+            guard let i = w.tabs.firstIndex(where: { $0.id == left.id }),
+                  let j = w.tabs.firstIndex(where: { $0.id == right.id }) else { return }
+            w.tabs[i].pairedWith = nil
+            w.tabs[j].pairedWith = left.id
+            w.tabs.swapAt(i, j) // the pair keeps its place in the sidebar
+        }
+        if currentID == left.id { currentID = right.id }
+        for d in otherDisplays.keys where otherDisplays[d]?.tab == left.id { otherDisplays[d]?.tab = right.id }
+        layoutChanged()
+    }
+
+    /// Where a tab's window goes on a display: the whole content area, or its half when
+    /// the tab is paired and the display is wide.
+    func frame(for tab: AppTab, on display: DisplayKey) -> NSRect? {
+        guard var f = contentFrame(on: display) else { return nil }
+        guard isWide(display), partner(of: tab) != nil else { return f }
+        let half = (f.width / 2).rounded(.down)
+        if primary(of: tab).id != tab.id { f.origin.x += f.width - half }
+        f.size.width = half
+        return f
     }
 
     // MARK: Displays
@@ -1443,28 +1558,32 @@ final class WorkspaceManager: ObservableObject {
     /// Brings each other display's selected window back to the front (without activating
     /// its app), after an activation here pulled windows of the same app over it.
     private func raiseOtherDisplays() {
-        for state in otherDisplays.values {
-            guard let tab = allTabs.first(where: { $0.id == state.tab }), let wid = tab.windowID,
-                  let app = runningApp(tab.bundleID), !app.isHidden,
-                  let w = AX.windows(pid: app.processIdentifier).first(where: { AX.windowID($0) == wid })
-            else { continue }
-            AXUIElementPerformAction(w, kAXRaiseAction as CFString)
+        for (d, state) in otherDisplays {
+            guard let tab = allTabs.first(where: { $0.id == state.tab }) else { continue }
+            var shown = [tab]
+            if isWide(d), let p = partner(of: tab) { shown.append(p) }
+            for t in shown {
+                guard let wid = t.windowID, let app = runningApp(t.bundleID), !app.isHidden,
+                      let w = AX.windows(pid: app.processIdentifier).first(where: { AX.windowID($0) == wid })
+                else { continue }
+                AXUIElementPerformAction(w, kAXRaiseAction as CFString)
+            }
         }
     }
 
     /// Moves a workspace's open windows into a display's content area (used when two
     /// displays trade workspaces), raising the selected one.
     private func gather(_ workspaceID: UUID, onto display: DisplayKey, raise tabID: UUID? = nil, except skip: UUID? = nil) {
-        guard AX.isTrusted, let ws = workspaces.first(where: { $0.id == workspaceID }),
-              let frame = contentFrame(on: display).map(AX.toAX) else { return }
+        guard AX.isTrusted, let ws = workspaces.first(where: { $0.id == workspaceID }) else { return }
         var top: AXUIElement?
         for bundleID in Set(ws.tabs.map(\.bundleID)) {
             guard let app = runningApp(bundleID) else { continue }
             let windows = AX.windows(pid: app.processIdentifier)
             for tab in ws.tabs where tab.bundleID == bundleID && tab.id != skip {
                 guard let wid = tab.windowID,
-                      let w = windows.first(where: { AX.windowID($0) == wid }), !AX.isFullScreen(w) else { continue }
-                AX.setFrame(w, frame)
+                      let w = windows.first(where: { AX.windowID($0) == wid }), !AX.isFullScreen(w),
+                      let frame = frame(for: tab, on: display).map(AX.toAX) else { continue }
+                AX.setFrame(w, frame, center: false)
                 if tab.id == tabID { top = w }
             }
         }
