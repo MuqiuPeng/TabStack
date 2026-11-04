@@ -75,6 +75,7 @@ struct SidebarView: View {
 enum WorkspaceColor {
     static let palette: [Color] = [.blue, .purple, .pink, .orange, .green, .teal, .indigo, .red]
     static func color(at index: Int) -> Color { palette[index % palette.count] }
+    static func color(for ws: Workspace, fallback index: Int) -> Color { color(at: ws.color ?? index) }
 }
 
 struct WorkspaceMenu: View {
@@ -88,7 +89,7 @@ struct WorkspaceMenu: View {
         Button { showMenu() } label: {
             VStack(spacing: 3) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 9).fill(WorkspaceColor.color(at: index))
+                    RoundedRectangle(cornerRadius: 9).fill(WorkspaceColor.color(for: current, fallback: index))
                     Text(String(current.name.prefix(1)).uppercased())
                         .font(.system(size: 15, weight: .bold))
                         .foregroundColor(.white)
@@ -111,6 +112,7 @@ struct WorkspaceMenu: View {
             }
             .contentShape(Rectangle())
             .animation(Motion.page, value: current.id)
+            .animation(Motion.page, value: current.color)
             .animation(Motion.page, value: current.name)
             .animation(Motion.press, value: hovering)
         }
@@ -138,6 +140,7 @@ struct WorkspaceMenu: View {
         }
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem("新建工作区…") { m.newWorkspace() })
+        menu.addItem(ClosureMenuItem("工作区设置…") { m.onOpenSettings?(current.id) })
         menu.addItem(ClosureMenuItem("重命名“\(current.name)”…") { m.renameCurrentWorkspace() })
         menu.addItem(ClosureMenuItem("上移工作区", enabled: index > 0) { m.moveCurrentWorkspace(by: -1) })
         menu.addItem(ClosureMenuItem("下移工作区", enabled: index < m.workspaces.count - 1) { m.moveCurrentWorkspace(by: 1) })
@@ -309,10 +312,15 @@ struct AddMenu: View {
         .help("添加窗口到“\(manager.currentWorkspace.name)”")
     }
 
-    /// Lists every running app with its windows, built when clicked (reading windows
-    /// through Accessibility is too slow to do on every SwiftUI render).
     private func showMenu() {
-        let m = manager
+        WindowPicker.popUp(manager: manager, workspaceID: manager.currentWorkspaceID)
+    }
+}
+
+/// Lists every running app with its windows. Built when clicked: reading windows through
+/// Accessibility is too slow to do on every SwiftUI render.
+enum WindowPicker {
+    static func popUp(manager m: WorkspaceManager, workspaceID: UUID) {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
@@ -332,7 +340,7 @@ struct AddMenu: View {
             if entry.windows.isEmpty {
                 // No window to pick: add the app, it binds to a window once one exists.
                 let item = ClosureMenuItem("\(name)（无窗口）") {
-                    m.add(app: app.bundleIdentifier ?? "", name: name)
+                    m.addApp(app.bundleIdentifier ?? "", name: name, to: workspaceID)
                 }
                 item.image = icon
                 menu.addItem(item)
@@ -346,7 +354,7 @@ struct AddMenu: View {
             for w in entry.windows {
                 let title = w.title.isEmpty ? "未命名窗口" : w.title
                 let item = ClosureMenuItem(title.count > 60 ? String(title.prefix(60)) + "…" : title) {
-                    m.add(window: w.id, title: w.title, of: app)
+                    m.addWindow(w.id, title: w.title, of: app, to: workspaceID)
                 }
                 item.indentationLevel = 1
                 item.toolTip = w.title
@@ -354,7 +362,7 @@ struct AddMenu: View {
             }
         }
         menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem("从“应用程序”文件夹选择…") { m.chooseApplication() })
+        menu.addItem(ClosureMenuItem("从“应用程序”文件夹选择…") { m.chooseApplication(to: workspaceID) })
 
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
@@ -444,7 +452,7 @@ private struct WorkspaceColumn: View {
                     .font(.system(size: 15, weight: .bold))
                     .foregroundColor(.white)
                     .frame(width: 34, height: 34)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(WorkspaceColor.color(at: index)))
+                    .background(RoundedRectangle(cornerRadius: 9).fill(WorkspaceColor.color(for: workspace, fallback: index)))
                     .scaleEffect(current && !Motion.reduce ? 1.08 : 1)
                 Text(workspace.name)
                     .font(.system(size: 9, weight: current ? .semibold : .regular))

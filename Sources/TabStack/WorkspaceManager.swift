@@ -57,6 +57,8 @@ struct Workspace: Identifiable, Codable, Equatable {
     var name: String
     var tabs: [AppTab] = []
     var lastTabID: UUID?
+    /// Index into WorkspaceColor.palette. Stored, so reordering keeps each color.
+    var color: Int?
 }
 
 enum Layout {
@@ -96,6 +98,8 @@ final class WorkspaceManager: ObservableObject {
     weak var panel: NSPanel?
     /// Set by the app delegate, which owns the panel.
     var onToggleSidebar: (() -> Void)?
+    /// Opens the settings window, optionally on a workspace. Set by the app delegate.
+    var onOpenSettings: ((UUID?) -> Void)?
     /// Whether the user wants the sidebar (⌥⌘0). It may still be hidden temporarily
     /// while a full-screen app is in front; layout follows this flag, not visibility.
     var sidebarShown = true
@@ -265,10 +269,7 @@ final class WorkspaceManager: ObservableObject {
     func newWorkspace() {
         guard let name = Dialogs.prompt(title: "新建工作区", message: "给这组窗口起个名字", value: "工作区 \(workspaces.count + 1)")
         else { return }
-        let ws = Workspace(name: name)
-        workspaces.append(ws)
-        save()
-        switchWorkspace(ws.id)
+        switchWorkspace(createWorkspace(named: name))
     }
 
     func renameCurrentWorkspace() {
@@ -546,7 +547,8 @@ final class WorkspaceManager: ObservableObject {
         runningApp(tab.bundleID)?.terminate()
     }
 
-    func chooseApplication() {
+    /// Picks apps from /Applications; adds them to `workspaceID` (default: current).
+    func chooseApplication(to workspaceID: UUID? = nil) {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
@@ -558,13 +560,115 @@ final class WorkspaceManager: ObservableObject {
             guard let id = Bundle(url: url)?.bundleIdentifier else { continue }
             let name = FileManager.default.displayName(atPath: url.path)
                 .replacingOccurrences(of: ".app", with: "")
-            add(app: id, name: name)
+            if let workspaceID { addApp(id, name: name, to: workspaceID) } else { add(app: id, name: name) }
         }
     }
 
     /// Un-hides every app of every workspace, so quitting TabStack never leaves apps invisible.
     func unhideAll() {
         for id in Set(allTabs.map(\.bundleID)) { runningApp(id)?.unhide() }
+    }
+
+    // MARK: Settings window
+
+    private func update(_ workspaceID: UUID, _ change: (inout Workspace) -> Void) {
+        guard let i = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
+        change(&workspaces[i])
+        save()
+    }
+
+    @discardableResult
+    func createWorkspace(named name: String) -> UUID {
+        var ws = Workspace(name: name)
+        let used = Set(workspaces.compactMap(\.color))
+        ws.color = (0..<WorkspaceColor.palette.count).first { !used.contains($0) }
+            ?? workspaces.count % WorkspaceColor.palette.count
+        workspaces.append(ws)
+        save()
+        return ws.id
+    }
+
+    func moveWorkspaces(from source: IndexSet, to destination: Int) {
+        workspaces.move(fromOffsets: source, toOffset: destination)
+        save()
+    }
+
+    func renameWorkspace(_ id: UUID, to name: String) {
+        update(id) { $0.name = name }
+    }
+
+    func setColor(_ id: UUID, _ color: Int) {
+        update(id) { $0.color = color }
+    }
+
+    /// Deletes after confirmation; leaving the current workspace first if needed.
+    func deleteWorkspace(_ id: UUID) {
+        guard workspaces.count > 1, let ws = workspaces.first(where: { $0.id == id }),
+              Dialogs.confirm(title: "删除工作区“\(ws.name)”？", message: "只删除这组标签，不会关闭其中的窗口或应用。")
+        else { return }
+        if id == currentWorkspaceID, let other = workspaces.first(where: { $0.id != id }) {
+            switchWorkspace(other.id)
+        }
+        workspaces.removeAll { $0.id == id }
+        save()
+        syncWatcher()
+    }
+
+    func moveTabs(in workspaceID: UUID, from source: IndexSet, to destination: Int) {
+        update(workspaceID) { $0.tabs.move(fromOffsets: source, toOffset: destination) }
+    }
+
+    func renameTab(_ id: UUID, to name: String) {
+        updateTab(id) { $0.customName = name.isEmpty ? nil : name }
+    }
+
+    func removeTab(_ tabID: UUID, from workspaceID: UUID) {
+        if workspaceID == currentWorkspaceID, let tab = tabs.first(where: { $0.id == tabID }) {
+            remove(tab)
+            return
+        }
+        update(workspaceID) {
+            $0.tabs.removeAll { $0.id == tabID }
+            if $0.lastTabID == tabID { $0.lastTabID = nil }
+        }
+        syncWatcher()
+    }
+
+    /// Moves a tab (with its window binding) to another workspace.
+    func moveTab(_ tabID: UUID, from source: UUID, to destination: UUID) {
+        guard source != destination,
+              let tab = workspaces.first(where: { $0.id == source })?.tabs.first(where: { $0.id == tabID })
+        else { return }
+        update(source) {
+            $0.tabs.removeAll { $0.id == tabID }
+            if $0.lastTabID == tabID { $0.lastTabID = nil }
+        }
+        if source == currentWorkspaceID && currentID == tabID { currentID = nil }
+        update(destination) { ws in
+            if let id = tab.windowID, ws.tabs.contains(where: { $0.windowID == id }) { return }
+            ws.tabs.append(tab)
+        }
+    }
+
+    /// Adds a window to any workspace; only the current one switches to it.
+    func addWindow(_ id: CGWindowID, title: String, of app: NSRunningApplication, to workspaceID: UUID) {
+        if workspaceID == currentWorkspaceID { add(window: id, title: title, of: app); return }
+        guard let bundleID = app.bundleIdentifier else { return }
+        update(workspaceID) { ws in
+            guard !ws.tabs.contains(where: { $0.windowID == id }) else { return }
+            ws.tabs.append(AppTab(bundleID: bundleID, name: app.localizedName ?? bundleID, title: title, windowID: id))
+        }
+        liveWindowIDs.insert(id)
+        syncWatcher()
+    }
+
+    func addApp(_ bundleID: String, name: String, to workspaceID: UUID) {
+        if workspaceID == currentWorkspaceID { add(app: bundleID, name: name); return }
+        update(workspaceID) { ws in
+            guard !ws.tabs.contains(where: { $0.bundleID == bundleID && $0.windowID == nil }) else { return }
+            ws.tabs.append(AppTab(bundleID: bundleID, name: name))
+        }
+        syncWatcher()
     }
 
     // MARK: Lookups
@@ -723,6 +827,10 @@ final class WorkspaceManager: ObservableObject {
             currentWorkspaceID = workspaces[0].id
         }
         currentID = currentWorkspace.lastTabID
+        // Pin each workspace's color to the one it showed so far (it used to follow position).
+        for i in workspaces.indices where workspaces[i].color == nil {
+            workspaces[i].color = i % WorkspaceColor.palette.count
+        }
         save() // persists ids given to tabs migrated from the app-level format
     }
 

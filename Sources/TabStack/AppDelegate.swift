@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var manager: WorkspaceManager!
     /// Menu bar icon: the always-available way back when the sidebar is hidden.
     private var statusItem: NSStatusItem!
+    private lazy var settings = SettingsWindowController(manager: manager)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         manager = WorkspaceManager()
@@ -32,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.contentView = NSHostingView(rootView: SidebarRoot(manager: manager))
         manager.panel = panel
         manager.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
+        manager.onOpenSettings = { [weak self] id in self?.settings.show(workspace: id) }
+        buildMainMenu()
         dock()
         panel.orderFrontRegardless()
         setUpStatusItem()
@@ -88,6 +91,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return false
     }
 
+    // MARK: Main menu (only visible while the settings window makes TabStack a regular app)
+
+    private func buildMainMenu() {
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(ClosureMenuItem("工作区设置…") { [weak self] in self?.settings.show() })
+        appMenu.items.last?.keyEquivalent = ","
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "退出 TabStack", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        // Standard edit actions, so ⌘C / ⌘V / ⌘A work in the settings text fields.
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        main.addItem(editItem)
+
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "关闭", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowItem.submenu = windowMenu
+        main.addItem(windowItem)
+
+        NSApp.mainMenu = main
+    }
+
     // MARK: Menu bar item
 
     private func setUpStatusItem() {
@@ -127,6 +167,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(item)
         }
         menu.addItem(ClosureMenuItem("新建工作区…") { [weak self] in self?.manager.newWorkspace() })
+        let settingsItem = ClosureMenuItem("工作区设置…") { [weak self] in self?.settings.show() }
+        settingsItem.keyEquivalent = ","
+        menu.addItem(settingsItem)
         menu.addItem(.separator())
         let motion = ClosureMenuItem("切换动画") { Motion.curtainEnabled.toggle() }
         motion.state = Motion.curtainEnabled ? .on : .off
@@ -199,7 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let index = manager.workspaces.firstIndex(of: ws) ?? 0
         HUD.shared.show(title: ws.name,
                         subtitle: "工作区 \(index + 1) / \(manager.workspaces.count)",
-                        color: WorkspaceColor.color(at: index))
+                        color: WorkspaceColor.color(for: ws, fallback: index))
     }
 
     /// Hidden by the user with ⌥⌘0 (as opposed to hidden because of full screen).
