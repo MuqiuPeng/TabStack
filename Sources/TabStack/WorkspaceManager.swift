@@ -520,7 +520,13 @@ final class WorkspaceManager: ObservableObject {
         if let id = tab.windowID, let w = windows.first(where: { AX.windowID($0) == id }) {
             return .window(w)
         }
-        let claimed = claimedWindowIDs(except: tab.id)
+        var claimed = claimedWindowIDs(except: tab.id)
+        // A window that appeared during another tab's restore is that tab's: terminals
+        // all open with the same title, so a title match alone would steal it.
+        for (other, r) in restoring where other != tab.id && r.wasRunning
+            && allTabs.first(where: { $0.id == other })?.bundleID == tab.bundleID {
+            claimed.formUnion(windows.compactMap(AX.windowID).filter { !r.before.contains($0) })
+        }
         let free = windows.filter { AX.windowID($0).map { !claimed.contains($0) } ?? false }
 
         // 1. A window that is recognizably this tab's (title, project folder, file, URLs).
@@ -552,11 +558,38 @@ final class WorkspaceManager: ObservableObject {
     private func bindResolved(_ tab: AppTab, _ w: AXUIElement) -> Resolution {
         guard let id = AX.windowID(w) else { return .unmatched }
         bind(tab.id, to: id, title: AX.title(w))
-        if let r = restoring.removeValue(forKey: tab.id), r.background,
-           tab.bundleID != currentTab?.bundleID {
-            runningApp(tab.bundleID)?.hide() // restored for later; keep it out of the way
-        }
+        if let r = restoring.removeValue(forKey: tab.id), r.background { settleRestored(tab, w) }
         return .window(w)
+    }
+
+    /// A window restored in the background opens wherever its app puts it (a terminal:
+    /// small, top left). Fit it into its workspace's content area like the others; then
+    /// keep it out of the way: hide its app, or, when that app is on screen, put the
+    /// window that was in front back on top.
+    private func settleRestored(_ tab: AppTab, _ w: AXUIElement) {
+        let ws = workspace(containing: tab.id)
+        let display = ws.flatMap { $0.id == currentWorkspaceID ? focusedDisplay : otherDisplay(showing: $0.id) }
+            ?? focusedDisplay
+        if let frame = frame(for: tab, on: display).map(AX.toAX), !AX.isFullScreen(w) {
+            AX.setFrame(w, frame, center: false)
+        }
+        let onScreen = Set([currentTab, currentTab.flatMap(partner)].compactMap { $0?.bundleID })
+            .union(appsOnOtherDisplays)
+        if !onScreen.contains(tab.bundleID) {
+            runningApp(tab.bundleID)?.hide()
+            return
+        }
+        // Same app as what is showing: raise the shown windows again, the selected one last.
+        var front: [AppTab] = otherDisplays.values.compactMap { s in allTabs.first { $0.id == s.tab } }
+        if let cur = currentTab {
+            let focused = currentWorkspace.tabs.first { $0.id == currentWorkspace.lastTabID } ?? cur
+            front += [cur, partner(of: cur)].compactMap { $0 }.filter { $0.id != focused.id } + [focused]
+        }
+        for t in front where t.bundleID == tab.bundleID && t.id != tab.id {
+            guard let wid = t.windowID, let app = runningApp(t.bundleID),
+                  let win = AX.windows(pid: app.processIdentifier).first(where: { AX.windowID($0) == wid }) else { continue }
+            AXUIElementPerformAction(win, kAXRaiseAction as CFString)
+        }
     }
 
     /// The free window that is recognizably this tab's, if any.
