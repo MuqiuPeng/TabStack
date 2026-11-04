@@ -331,6 +331,21 @@ final class WorkspaceManager: ObservableObject {
         return .window(pick)
     }
 
+    /// Binds every tab that has no live window to one of its app's free windows
+    /// (same title first). Runs in the background so migrated or orphaned tabs settle
+    /// without needing a click.
+    private func bindUnboundTabs() {
+        guard AX.isTrusted else { return }
+        refreshLiveWindows()
+        // Tabs that remember a title go first, so they get their own window back.
+        let unbound = allTabs.filter { !isBound($0) && runningIDs.contains($0.bundleID) }
+            .sorted { ($0.title?.isEmpty == false ? 0 : 1) < ($1.title?.isEmpty == false ? 0 : 1) }
+        for tab in unbound {
+            guard let app = runningApp(tab.bundleID) else { continue }
+            _ = resolve(tab, pid: app.processIdentifier)
+        }
+    }
+
     private func bind(_ tabID: UUID, to windowID: CGWindowID, title: String) {
         updateTab(tabID) {
             $0.windowID = windowID
@@ -426,10 +441,10 @@ final class WorkspaceManager: ObservableObject {
 
     // MARK: Editing tabs
 
-    /// Running apps with their windows that aren't tabs of this workspace yet.
+    /// Running apps with their windows that no tab has yet.
     func addableApps() -> [AddableApp] {
-        let inWorkspace = Set(tabs.compactMap(\.windowID))
-        let unboundApps = Set(tabs.filter { $0.windowID == nil }.map(\.bundleID))
+        bindUnboundTabs() // so windows already backing a tab are recognized as taken
+        let taken = claimedWindowIDs()
         return NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != nil
                 && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
@@ -437,13 +452,15 @@ final class WorkspaceManager: ObservableObject {
             .compactMap { app in
                 let windows: [(id: CGWindowID, title: String)] = AX.isTrusted
                     ? AX.windows(pid: app.processIdentifier).compactMap { w in
-                        guard let id = AX.windowID(w), !inWorkspace.contains(id) else { return nil }
+                        guard let id = AX.windowID(w), !taken.contains(id) else { return nil }
                         return (id, AX.title(w))
                     }
                     : []
                 let hasAnyWindow = AX.isTrusted && !AX.windows(pid: app.processIdentifier).isEmpty
-                // Hide apps whose every window is already a tab here.
-                if windows.isEmpty && (hasAnyWindow || unboundApps.contains(app.bundleIdentifier!)) { return nil }
+                let hasTab = allTabs.contains { $0.bundleID == app.bundleIdentifier }
+                // Leave out apps whose every window is already a tab, and window-less apps
+                // that already have a tab waiting for a window.
+                if windows.isEmpty && (hasAnyWindow || hasTab) { return nil }
                 return AddableApp(app: app, windows: windows)
             }
     }
@@ -657,6 +674,7 @@ final class WorkspaceManager: ObservableObject {
         }
         refreshLiveWindows()
         guard t else { return }
+        bindUnboundTabs()
         refreshTitles()
         let b = AX.dockBadges()
         if b != badges { badges = b }
