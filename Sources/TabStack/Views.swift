@@ -187,71 +187,100 @@ struct TabButton: View {
     @State private var hovering = false
 
     var body: some View {
-        let selected = manager.currentID == tab.bundleID
+        let selected = manager.currentID == tab.id
+        let available = manager.isAvailable(tab)
         let running = manager.runningIDs.contains(tab.bundleID)
         let badge = manager.badge(for: tab)
+        let label = manager.label(for: tab)
         // Scoped per workspace so the outgoing and incoming pages never share a highlight.
         let matchID = "selection-\(manager.currentWorkspaceID)"
 
         Button { manager.select(tab) } label: {
-            Image(nsImage: manager.icon(for: tab.bundleID))
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 34, height: 34)
-                .opacity(running ? 1 : 0.45)
-                .saturation(running ? 1 : 0.3)
-                .scaleEffect(hovering && !reduceMotion ? 1.06 : 1)
-                .frame(width: 48, height: 46)
-                .background {
-                    ZStack {
-                        if hovering && !selected {
-                            RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.08))
-                                .transition(.opacity)
-                        }
-                        if selected {
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(Color.accentColor.opacity(0.28))
-                                .matchedGeometryEffect(id: matchID, in: selectionNS)
-                        }
-                    }
+            VStack(spacing: 2) {
+                Image(nsImage: manager.icon(for: tab.bundleID))
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 34, height: 34)
+                    .opacity(available ? 1 : 0.45)
+                    .saturation(available ? 1 : 0.3)
+                    .scaleEffect(hovering && !reduceMotion ? 1.06 : 1)
+                if let label {
+                    Text(label)
+                        .font(.system(size: 8.5))
+                        .foregroundColor(selected ? .primary : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(width: 50)
+                        .transition(.opacity)
                 }
-                .overlay(alignment: .topTrailing) {
-                    if let badge {
-                        Text(badge)
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Color.red))
-                            .offset(x: 3, y: -2)
-                            .transition(.scale(scale: 0.3, anchor: .center).combined(with: .opacity))
+            }
+            .frame(width: 52, height: label == nil ? 46 : 56)
+            .background {
+                ZStack {
+                    if hovering && !selected {
+                        RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.08))
+                            .transition(.opacity)
                     }
-                }
-                .overlay(alignment: .leading) {
                     if selected {
-                        Capsule().fill(Color.accentColor)
-                            .frame(width: 3, height: 22)
-                            .offset(x: -6)
-                            .matchedGeometryEffect(id: matchID + "-bar", in: selectionNS)
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color.accentColor.opacity(0.28))
+                            .matchedGeometryEffect(id: matchID, in: selectionNS)
                     }
                 }
-                .contentShape(Rectangle())
-                .animation(Motion.press, value: hovering)
-                .animation(Motion.press, value: badge)
-                .animation(.easeInOut(duration: 0.3), value: running)
+            }
+            .overlay(alignment: .topTrailing) {
+                if let badge {
+                    Text(badge)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.red))
+                        .offset(x: 3, y: -2)
+                        .transition(.scale(scale: 0.3, anchor: .center).combined(with: .opacity))
+                }
+            }
+            .overlay(alignment: .leading) {
+                if selected {
+                    Capsule().fill(Color.accentColor)
+                        .frame(width: 3, height: 22)
+                        .offset(x: -6)
+                        .matchedGeometryEffect(id: matchID + "-bar", in: selectionNS)
+                }
+            }
+            .contentShape(Rectangle())
+            .animation(Motion.press, value: hovering)
+            .animation(Motion.press, value: badge)
+            .animation(.easeInOut(duration: 0.3), value: available)
+            .animation(.easeInOut(duration: 0.2), value: label)
         }
         .buttonStyle(PressStyle())
         .onHover { hovering = $0 }
-        .help(index < 9 ? "\(tab.name)   ⌥⌘\(index + 1)" : tab.name)
+        .help(tooltip)
         .contextMenu {
+            Button("重命名…") { manager.rename(tab) }
+            if running {
+                Button("绑定到 \(tab.name) 当前窗口") { manager.rebindToFocusedWindow(tab) }
+            }
+            Divider()
             Button("上移") { manager.move(tab, by: -1) }.disabled(index == 0)
             Button("下移") { manager.move(tab, by: 1) }.disabled(index == manager.tabs.count - 1)
             Divider()
             if running {
-                Button("退出 \(tab.name)") { manager.quit(tab) }
+                Button("退出 \(tab.name)（所有窗口）") { manager.quit(tab) }
             }
             Button("从工作区移除") { manager.remove(tab) }
         }
+    }
+
+    private var tooltip: String {
+        var text = tab.name
+        if let title = tab.customName ?? tab.title, !title.isEmpty, title != tab.name { text += " — \(title)" }
+        if !manager.isBound(tab) && manager.runningIDs.contains(tab.bundleID) && tab.windowID != nil {
+            text += "（窗口已关闭，点击重新绑定）"
+        }
+        if index < 9 { text += "   ⌥⌘\(index + 1)" }
+        return text
     }
 }
 
@@ -269,26 +298,65 @@ struct AddMenu: View {
     @ObservedObject var manager: WorkspaceManager
 
     var body: some View {
-        Menu {
-            let candidates = manager.candidates()
-            if candidates.isEmpty {
-                Text("没有其他正在运行的应用")
-            }
-            ForEach(candidates, id: \.processIdentifier) { app in
-                Button(app.localizedName ?? app.bundleIdentifier ?? "?") { manager.add(app) }
-            }
-            Divider()
-            Button("从“应用程序”文件夹选择…") { manager.chooseApplication() }
-        } label: {
+        Button { showMenu() } label: {
             Image(systemName: "plus")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(.secondary)
                 .frame(width: 40, height: 32)
+                .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .frame(width: 44)
-        .help("添加应用到“\(manager.currentWorkspace.name)”")
+        .buttonStyle(PressStyle())
+        .help("添加窗口到“\(manager.currentWorkspace.name)”")
+    }
+
+    /// Lists every running app with its windows, built when clicked (reading windows
+    /// through Accessibility is too slow to do on every SwiftUI render).
+    private func showMenu() {
+        let m = manager
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let apps = m.addableApps()
+        if apps.isEmpty {
+            let none = NSMenuItem(title: "没有可添加的窗口", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        }
+        for (i, entry) in apps.enumerated() {
+            let app = entry.app
+            let name = app.localizedName ?? app.bundleIdentifier ?? "?"
+            let icon = m.icon(for: app.bundleIdentifier ?? "").copy() as! NSImage
+            icon.size = NSSize(width: 16, height: 16)
+            if i > 0 { menu.addItem(.separator()) }
+
+            if entry.windows.isEmpty {
+                // No window to pick: add the app, it binds to a window once one exists.
+                let item = ClosureMenuItem("\(name)（无窗口）") {
+                    m.add(app: app.bundleIdentifier ?? "", name: name)
+                }
+                item.image = icon
+                menu.addItem(item)
+                continue
+            }
+
+            let header = NSMenuItem(title: name, action: nil, keyEquivalent: "")
+            header.image = icon
+            header.isEnabled = false
+            menu.addItem(header)
+            for w in entry.windows {
+                let title = w.title.isEmpty ? "未命名窗口" : w.title
+                let item = ClosureMenuItem(title.count > 60 ? String(title.prefix(60)) + "…" : title) {
+                    m.add(window: w.id, title: w.title, of: app)
+                }
+                item.indentationLevel = 1
+                item.toolTip = w.title
+                menu.addItem(item)
+            }
+        }
+        menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem("从“应用程序”文件夹选择…") { m.chooseApplication() })
+
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 }
 

@@ -63,7 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .toggleSidebar: self.toggleSidebar()
             case .cycleTab(let offset):
                 if let tab = self.manager.cycleTab(offset) {
-                    HUD.shared.show(title: tab.name, icon: self.manager.icon(for: tab.bundleID))
+                    HUD.shared.show(title: tab.displayName,
+                                    subtitle: tab.displayName == tab.name ? nil : tab.name,
+                                    icon: self.manager.icon(for: tab.bundleID))
                 }
             case .cycleWorkspace(let offset):
                 if self.manager.cycleWorkspace(offset) != nil { self.showWorkspaceHUD() }
@@ -73,8 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if !AX.isTrusted { AX.requestTrust() }
 
-        // Bring back the app that was selected when TabStack last quit.
-        if let tab = manager.tabs.first(where: { $0.bundleID == manager.currentID }),
+        // Bring back the tab that was selected when TabStack last quit.
+        if let tab = manager.currentTab,
            manager.runningApp(tab.bundleID) != nil, AX.isTrusted {
             manager.select(tab)
         }

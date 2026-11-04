@@ -2,33 +2,83 @@ import Cocoa
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// One tab = one specific window of an app (a Chrome app can back several tabs).
+///
+/// `windowID` is the WindowServer id, valid only while that window exists. When the window
+/// is closed or the app restarts, the tab becomes *unbound* and re-binds the next time it
+/// is used: to a window with the same title if there is one, otherwise to a window of the
+/// app that no other tab is using.
 struct AppTab: Identifiable, Codable, Equatable {
+    var id: UUID
     var bundleID: String
+    /// App name.
     var name: String
-    var id: String { bundleID }
+    /// Name the user gave the tab, shown instead of the window title.
+    var customName: String?
+    /// Last seen window title, used for display and for re-binding.
+    var title: String?
+    var windowID: CGWindowID?
+
+    init(bundleID: String, name: String, title: String? = nil, windowID: CGWindowID? = nil) {
+        self.id = UUID()
+        self.bundleID = bundleID
+        self.name = name
+        self.title = title
+        self.windowID = windowID
+    }
+
+    enum CodingKeys: String, CodingKey { case id, bundleID, name, customName, title, windowID }
+
+    /// Also reads tabs saved by the app-level version (no id / window fields).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        bundleID = try c.decode(String.self, forKey: .bundleID)
+        name = try c.decode(String.self, forKey: .name)
+        customName = try c.decodeIfPresent(String.self, forKey: .customName)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        windowID = try c.decodeIfPresent(CGWindowID.self, forKey: .windowID)
+    }
+
+    /// Identity is the tab, not its changing title.
+    static func == (a: AppTab, b: AppTab) -> Bool { a.id == b.id }
+
+    var displayName: String {
+        if let customName, !customName.isEmpty { return customName }
+        if let title, !title.isEmpty { return title }
+        return name
+    }
 }
 
-/// A saved combination of apps. Switching workspaces hides the previous set and
-/// brings back the app that was last selected in the new one.
+/// A saved set of windows. Switching workspaces hides the previous set and brings back
+/// the tab that was last selected in the new one.
 struct Workspace: Identifiable, Codable, Equatable {
     var id = UUID()
     var name: String
     var tabs: [AppTab] = []
-    var lastBundleID: String?
+    var lastTabID: UUID?
 }
 
 enum Layout {
     static let sidebarWidth: CGFloat = 64
 }
 
+/// A running app and its windows, for the "add" menu.
+struct AddableApp {
+    let app: NSRunningApplication
+    let windows: [(id: CGWindowID, title: String)]
+}
+
 final class WorkspaceManager: ObservableObject {
     @Published private(set) var workspaces: [Workspace] = []
     @Published private(set) var currentWorkspaceID = UUID()
-    @Published private(set) var currentID: String?
+    /// Selected tab of the current workspace.
+    @Published private(set) var currentID: UUID?
     /// +1 when the last workspace switch went to a later workspace, -1 to an earlier one;
     /// drives the direction of the sidebar's page transition.
     @Published private(set) var workspaceDirection = 1
     @Published private(set) var runningIDs: Set<String> = []
+    @Published private(set) var liveWindowIDs: Set<CGWindowID> = []
     @Published private(set) var badges: [String: String] = [:]
     @Published private(set) var trusted = AX.isTrusted
 
@@ -44,6 +94,10 @@ final class WorkspaceManager: ObservableObject {
     private var timer: Timer?
     /// Bumped on every placement request so stale retry loops stop.
     private var placeToken = 0
+    private let watcher = WindowWatcher()
+    /// The switch in progress. Until it expires, focus changes are side effects of the
+    /// switch itself (apps being hidden hand focus around) and must not move the selection.
+    private var pending: (tabID: UUID, until: Date)?
 
     private enum Keys {
         static let workspaces = "workspaces"
@@ -54,7 +108,10 @@ final class WorkspaceManager: ObservableObject {
     init() {
         load()
         refreshRunning()
+        refreshLiveWindows()
         observeWorkspace()
+        watcher.onFocusChange = { [weak self] pid in self?.handleFocus(pid: pid) }
+        syncWatcher()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.tick() }
         tick()
     }
@@ -65,28 +122,43 @@ final class WorkspaceManager: ObservableObject {
 
     var tabs: [AppTab] { currentWorkspace.tabs }
 
+    var currentTab: AppTab? { tabs.first { $0.id == currentID } }
+
     private func updateCurrent(_ change: (inout Workspace) -> Void) {
         guard let i = workspaces.firstIndex(where: { $0.id == currentWorkspaceID }) else { return }
         change(&workspaces[i])
         save()
     }
 
-    // MARK: Switching apps
+    /// Applies `change` to the tab with this id, in whichever workspace holds it.
+    private func updateTab(_ id: UUID, _ change: (inout AppTab) -> Void) {
+        for w in workspaces.indices {
+            if let t = workspaces[w].tabs.firstIndex(where: { $0.id == id }) {
+                change(&workspaces[w].tabs[t])
+                save()
+                return
+            }
+        }
+    }
 
-    /// Switches to `tab`. `alsoHide` lists extra apps to hide in the same motion (the
-    /// apps of the workspace being left).
+    // MARK: Switching tabs
+
+    /// Switches to `tab`. `alsoHide` lists extra apps (bundle ids) to hide in the same
+    /// motion: the apps of the workspace being left.
     func select(_ tab: AppTab, alsoHide: [String] = []) {
-        currentID = tab.bundleID
-        updateCurrent { $0.lastBundleID = tab.bundleID }
+        currentID = tab.id
+        updateCurrent { $0.lastTabID = tab.id }
         guard AX.isTrusted else { AX.requestTrust(); return }
 
-        // While this switch settles, activations of other apps are side effects of it
-        // (see the activation observer) and must not change the selection.
-        pending = (tab.bundleID, Date().addingTimeInterval(1.2))
+        pending = (tab.id, Date().addingTimeInterval(1.2))
 
         // The sidebar highlight already moved; the windows change behind the curtain.
-        // Nothing to cover when the target is already the app in front.
-        let alreadyFront = runningApp(tab.bundleID)?.isActive == true && alsoHide.isEmpty
+        // Nothing to cover when that exact window is already in front.
+        let alreadyFront: Bool = {
+            guard alsoHide.isEmpty, let app = runningApp(tab.bundleID), app.isActive,
+                  let w = AX.focusedWindow(pid: app.processIdentifier) else { return false }
+            return AX.windowID(w) == tab.windowID
+        }()
         if !alreadyFront, let frame = contentFrameCocoa {
             SwitchCurtain.shared.cover(frame, icon: icon(for: tab.bundleID)) { [weak self] in
                 self?.performSwitch(to: tab, alsoHide: alsoHide)
@@ -97,35 +169,34 @@ final class WorkspaceManager: ObservableObject {
     }
 
     private func performSwitch(to tab: AppTab, alsoHide: [String]) {
-        guard currentID == tab.bundleID else { return } // superseded by a newer switch
+        guard currentID == tab.id else { return } // superseded by a newer switch
 
         // Activate the target *before* hiding the others: hiding the frontmost app makes
-        // macOS hand focus to some other app first, which used to hijack the selection.
+        // macOS hand focus to some other app first.
         if let app = runningApp(tab.bundleID) {
             app.unhide()
             AX.activate(app)
-            place(app)
+            place(tab)
         } else {
             launch(tab)
         }
 
+        // Other apps are hidden. Other tabs of the *same* app can't be hidden one by one;
+        // they share the content frame, so the raised window simply covers them.
         let others = Set(tabs.map(\.bundleID) + alsoHide).subtracting([tab.bundleID])
         for id in others { runningApp(id)?.hide() }
     }
-
-    /// The selection in progress and until when it is considered settling.
-    private var pending: (id: String, until: Date)?
 
     func selectIndex(_ index: Int) {
         guard tabs.indices.contains(index) else { return }
         select(tabs[index])
     }
 
-    /// Moves to the previous (-1) or next (+1) app of the current workspace, wrapping around.
+    /// Moves to the previous (-1) or next (+1) tab of the current workspace, wrapping around.
     @discardableResult
     func cycleTab(_ offset: Int) -> AppTab? {
         guard !tabs.isEmpty else { return nil }
-        let i = tabs.firstIndex { $0.bundleID == currentID }
+        let i = tabs.firstIndex { $0.id == currentID }
         let next = i.map { wrap($0 + offset, tabs.count) } ?? (offset > 0 ? 0 : tabs.count - 1)
         let tab = tabs[next]
         select(tab)
@@ -153,12 +224,12 @@ final class WorkspaceManager: ObservableObject {
         workspaceDirection = to >= from ? 1 : -1
 
         let keep = Set(next.tabs.map(\.bundleID))
-        let leaving = tabs.map(\.bundleID).filter { !keep.contains($0) }
+        let leaving = Array(Set(tabs.map(\.bundleID)).subtracting(keep))
         currentWorkspaceID = id
         currentID = nil
         save()
 
-        if let target = next.tabs.first(where: { $0.bundleID == next.lastBundleID }) ?? next.tabs.first {
+        if let target = next.tabs.first(where: { $0.id == next.lastTabID }) ?? next.tabs.first {
             select(target, alsoHide: leaving)
         } else {
             // Empty workspace: nothing to show, just put the old set away.
@@ -172,7 +243,7 @@ final class WorkspaceManager: ObservableObject {
     }
 
     func newWorkspace() {
-        guard let name = Dialogs.prompt(title: "新建工作区", message: "给这组应用起个名字", value: "工作区 \(workspaces.count + 1)")
+        guard let name = Dialogs.prompt(title: "新建工作区", message: "给这组窗口起个名字", value: "工作区 \(workspaces.count + 1)")
         else { return }
         let ws = Workspace(name: name)
         workspaces.append(ws)
@@ -187,13 +258,14 @@ final class WorkspaceManager: ObservableObject {
 
     func deleteCurrentWorkspace() {
         guard workspaces.count > 1,
-              Dialogs.confirm(title: "删除工作区“\(currentWorkspace.name)”？", message: "只删除这组标签，不会退出其中的应用。")
+              Dialogs.confirm(title: "删除工作区“\(currentWorkspace.name)”？", message: "只删除这组标签，不会关闭其中的窗口或应用。")
         else { return }
         let removed = currentWorkspaceID
         let fallback = workspaces.first { $0.id != removed }!.id
         switchWorkspace(fallback)
         workspaces.removeAll { $0.id == removed }
         save()
+        syncWatcher()
     }
 
     func moveCurrentWorkspace(by offset: Int) {
@@ -206,8 +278,9 @@ final class WorkspaceManager: ObservableObject {
 
     /// Starts every app of the current workspace that is not running yet, hidden.
     func launchAllInWorkspace() {
-        for tab in tabs where runningApp(tab.bundleID) == nil && tab.bundleID != currentID {
-            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: tab.bundleID) else { continue }
+        let current = currentTab?.bundleID
+        for id in Set(tabs.map(\.bundleID)) where runningApp(id) == nil && id != current {
+            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { continue }
             let config = NSWorkspace.OpenConfiguration()
             config.activates = false
             config.hides = true
@@ -215,15 +288,66 @@ final class WorkspaceManager: ObservableObject {
         }
     }
 
-    // MARK: Placement
+    // MARK: Windows of a tab
 
-    /// Re-fits the current app after the screen layout changed or the sidebar was toggled.
-    func layoutChanged() {
-        guard let id = currentID, let app = runningApp(id), !app.isHidden else { return }
-        place(app)
+    private var allTabs: [AppTab] { workspaces.flatMap(\.tabs) }
+
+    /// Windows that some tab (in any workspace) is bound to.
+    private func claimedWindowIDs(except tabID: UUID? = nil) -> Set<CGWindowID> {
+        Set(allTabs.filter { $0.id != tabID }.compactMap(\.windowID))
     }
 
-    /// The area apps are fitted into: the screen's visible frame (no menu bar / Dock)
+    func isBound(_ tab: AppTab) -> Bool {
+        tab.windowID.map(liveWindowIDs.contains) ?? false
+    }
+
+    /// Whether clicking the tab can show something right away: the app runs and the window
+    /// still exists, or the tab is waiting to be bound to one.
+    func isAvailable(_ tab: AppTab) -> Bool {
+        runningIDs.contains(tab.bundleID) && (tab.windowID == nil || isBound(tab))
+    }
+
+    private enum Resolution {
+        case window(AXUIElement)
+        /// The app has no windows at all (yet).
+        case noWindows
+        /// Every window of the app already belongs to another tab.
+        case allClaimed
+    }
+
+    /// Finds the tab's window, re-binding an unbound tab when needed.
+    private func resolve(_ tab: AppTab, pid: pid_t) -> Resolution {
+        let windows = AX.windows(pid: pid)
+        if windows.isEmpty { return .noWindows }
+        if let id = tab.windowID, let w = windows.first(where: { AX.windowID($0) == id }) {
+            return .window(w)
+        }
+        let claimed = claimedWindowIDs(except: tab.id)
+        let free = windows.filter { AX.windowID($0).map { !claimed.contains($0) } ?? false }
+        guard let pick = free.first(where: { !(tab.title ?? "").isEmpty && AX.title($0) == tab.title }) ?? free.first,
+              let id = AX.windowID(pick)
+        else { return .allClaimed }
+        bind(tab.id, to: id, title: AX.title(pick))
+        return .window(pick)
+    }
+
+    private func bind(_ tabID: UUID, to windowID: CGWindowID, title: String) {
+        updateTab(tabID) {
+            $0.windowID = windowID
+            $0.title = title
+        }
+        liveWindowIDs.insert(windowID)
+    }
+
+    // MARK: Placement
+
+    /// Re-fits the current tab after the screen layout changed or the sidebar was toggled.
+    func layoutChanged() {
+        guard let tab = currentTab, let app = runningApp(tab.bundleID), !app.isHidden else { return }
+        place(tab)
+    }
+
+    /// The area windows are fitted into: the screen's visible frame (no menu bar / Dock)
     /// minus the sidebar when it is shown.
     private var contentFrameCocoa: NSRect? {
         guard let screen = panel?.screen ?? NSScreen.screens.first else { return nil }
@@ -237,33 +361,44 @@ final class WorkspaceManager: ObservableObject {
 
     private var contentFrameAX: CGRect? { contentFrameCocoa.map(AX.toAX) }
 
-    /// Fits the app's main window into the content area. Apps that are still launching or
-    /// have no open window are retried for a few seconds; halfway through, a "reopen" is
-    /// sent, which makes most apps open a new window.
-    private func place(_ app: NSRunningApplication) {
+    /// Fits the tab's window into the content area and raises it. Apps that are still
+    /// launching or have no window are retried for a few seconds; halfway through, a
+    /// "reopen" is sent, which makes most apps open a new window.
+    private func place(_ tab: AppTab) {
         placeToken += 1
-        place(app, token: placeToken, attempt: 0)
+        place(tabID: tab.id, token: placeToken, attempt: 0)
     }
 
-    private func place(_ app: NSRunningApplication, token: Int, attempt: Int) {
-        guard token == placeToken, !app.isTerminated, let frame = contentFrameAX else { return }
+    private func place(tabID: UUID, token: Int, attempt: Int) {
+        guard token == placeToken else { return }
+        guard let tab = allTabs.first(where: { $0.id == tabID }),
+              let app = runningApp(tab.bundleID), !app.isTerminated,
+              let frame = contentFrameAX
+        else { SwitchCurtain.shared.reveal(); return }
 
-        if let w = AX.mainWindow(pid: app.processIdentifier) {
+        switch resolve(tab, pid: app.processIdentifier) {
+        case .window(let w):
             // A full-screen window lives in its own Space; leave it alone.
             if AX.isFullScreen(w) { SwitchCurtain.shared.reveal(); return }
             AX.setFrame(w, frame)
             AX.raise(w)
-            if attempt >= 0 { SwitchCurtain.shared.reveal() }
-            // A second pass catches apps that reposition themselves while un-hiding.
             if attempt >= 0 {
-                after(0.25) { [weak self] in self?.place(app, token: token, attempt: -1) }
+                SwitchCurtain.shared.reveal()
+                // A second pass catches apps that reposition themselves while un-hiding.
+                after(0.25) { [weak self] in self?.place(tabID: tabID, token: token, attempt: -1) }
             }
-            return
-        }
 
-        guard attempt >= 0, attempt < 40 else { SwitchCurtain.shared.reveal(); return }
-        if attempt == 10 { reopen(app) }
-        after(0.1) { [weak self] in self?.place(app, token: token, attempt: attempt + 1) }
+        case .allClaimed:
+            SwitchCurtain.shared.reveal()
+            HUD.shared.show(title: "\(tab.name) 没有空闲的窗口",
+                            subtitle: "这个标签的窗口已关闭，请在 \(tab.name) 里新建一个窗口",
+                            icon: icon(for: tab.bundleID))
+
+        case .noWindows:
+            guard attempt >= 0, attempt < 40 else { SwitchCurtain.shared.reveal(); return }
+            if attempt == 10 { reopen(app) }
+            after(0.1) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1) }
+        }
     }
 
     private func reopen(_ app: NSRunningApplication) {
@@ -283,33 +418,67 @@ final class WorkspaceManager: ObservableObject {
         config.activates = true
         NSWorkspace.shared.openApplication(at: url, configuration: config) { app, _ in
             DispatchQueue.main.async { [weak self] in
-                guard let self, let app, self.currentID == tab.bundleID else { return }
-                self.place(app)
+                guard let self, app != nil, self.currentID == tab.id else { return }
+                self.place(tab)
             }
         }
     }
 
     // MARK: Editing tabs
 
-    func add(_ app: NSRunningApplication) {
-        guard let id = app.bundleIdentifier else { return }
-        add(AppTab(bundleID: id, name: app.localizedName ?? id))
+    /// Running apps with their windows that aren't tabs of this workspace yet.
+    func addableApps() -> [AddableApp] {
+        let inWorkspace = Set(tabs.compactMap(\.windowID))
+        let unboundApps = Set(tabs.filter { $0.windowID == nil }.map(\.bundleID))
+        return NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != nil
+                && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
+            .sorted { ($0.localizedName ?? "").localizedStandardCompare($1.localizedName ?? "") == .orderedAscending }
+            .compactMap { app in
+                let windows: [(id: CGWindowID, title: String)] = AX.isTrusted
+                    ? AX.windows(pid: app.processIdentifier).compactMap { w in
+                        guard let id = AX.windowID(w), !inWorkspace.contains(id) else { return nil }
+                        return (id, AX.title(w))
+                    }
+                    : []
+                let hasAnyWindow = AX.isTrusted && !AX.windows(pid: app.processIdentifier).isEmpty
+                // Hide apps whose every window is already a tab here.
+                if windows.isEmpty && (hasAnyWindow || unboundApps.contains(app.bundleIdentifier!)) { return nil }
+                return AddableApp(app: app, windows: windows)
+            }
     }
 
-    func add(_ tab: AppTab) {
-        if !tabs.contains(tab) {
-            updateCurrent { $0.tabs.append(tab) }
+    /// Adds one window of a running app as a tab.
+    func add(window id: CGWindowID, title: String, of app: NSRunningApplication) {
+        guard let bundleID = app.bundleIdentifier else { return }
+        if let existing = tabs.first(where: { $0.windowID == id }) { select(existing); return }
+        let tab = AppTab(bundleID: bundleID, name: app.localizedName ?? bundleID, title: title, windowID: id)
+        updateCurrent { $0.tabs.append(tab) }
+        liveWindowIDs.insert(id)
+        syncWatcher()
+        select(tab)
+    }
+
+    /// Adds an app without picking a window; it binds to one when first shown.
+    func add(app bundleID: String, name: String) {
+        if let existing = tabs.first(where: { $0.bundleID == bundleID && $0.windowID == nil }) {
+            select(existing)
+            return
         }
+        let tab = AppTab(bundleID: bundleID, name: name)
+        updateCurrent { $0.tabs.append(tab) }
+        syncWatcher()
         select(tab)
     }
 
     func remove(_ tab: AppTab) {
         updateCurrent {
             $0.tabs.removeAll { $0 == tab }
-            if $0.lastBundleID == tab.bundleID { $0.lastBundleID = nil }
+            if $0.lastTabID == tab.id { $0.lastTabID = nil }
         }
-        if currentID == tab.bundleID { currentID = nil }
+        if currentID == tab.id { currentID = nil }
         runningApp(tab.bundleID)?.unhide()
+        syncWatcher()
     }
 
     func move(_ tab: AppTab, by offset: Int) {
@@ -319,21 +488,25 @@ final class WorkspaceManager: ObservableObject {
         }
     }
 
-    func quit(_ tab: AppTab) {
-        runningApp(tab.bundleID)?.terminate()
+    func rename(_ tab: AppTab) {
+        guard let name = Dialogs.prompt(title: "重命名标签", message: "留空则显示窗口标题",
+                                        value: tab.customName ?? tab.title ?? "", allowEmpty: true)
+        else { return }
+        updateTab(tab.id) { $0.customName = name.isEmpty ? nil : name }
     }
 
-    /// Running regular apps that are not yet in the current workspace.
-    func candidates() -> [NSRunningApplication] {
-        let existing = Set(tabs.map(\.bundleID))
-        return NSWorkspace.shared.runningApplications
-            .filter {
-                guard let id = $0.bundleIdentifier else { return false }
-                return $0.activationPolicy == .regular
-                    && id != Bundle.main.bundleIdentifier
-                    && !existing.contains(id)
-            }
-            .sorted { ($0.localizedName ?? "").localizedStandardCompare($1.localizedName ?? "") == .orderedAscending }
+    /// Points the tab at the app's currently focused window.
+    func rebindToFocusedWindow(_ tab: AppTab) {
+        guard let app = runningApp(tab.bundleID),
+              let w = AX.focusedWindow(pid: app.processIdentifier) ?? AX.windows(pid: app.processIdentifier).first,
+              let id = AX.windowID(w)
+        else { NSSound.beep(); return }
+        bind(tab.id, to: id, title: AX.title(w))
+        select(tab)
+    }
+
+    func quit(_ tab: AppTab) {
+        runningApp(tab.bundleID)?.terminate()
     }
 
     func chooseApplication() {
@@ -348,13 +521,13 @@ final class WorkspaceManager: ObservableObject {
             guard let id = Bundle(url: url)?.bundleIdentifier else { continue }
             let name = FileManager.default.displayName(atPath: url.path)
                 .replacingOccurrences(of: ".app", with: "")
-            add(AppTab(bundleID: id, name: name))
+            add(app: id, name: name)
         }
     }
 
     /// Un-hides every app of every workspace, so quitting TabStack never leaves apps invisible.
     func unhideAll() {
-        for tab in workspaces.flatMap(\.tabs) { runningApp(tab.bundleID)?.unhide() }
+        for id in Set(allTabs.map(\.bundleID)) { runningApp(id)?.unhide() }
     }
 
     // MARK: Lookups
@@ -381,40 +554,71 @@ final class WorkspaceManager: ObservableObject {
         return nil
     }
 
+    /// Text under the icon: the custom name, or the window title when the workspace holds
+    /// several windows of the same app (otherwise the icon alone is clear enough).
+    func label(for tab: AppTab) -> String? {
+        if let c = tab.customName, !c.isEmpty { return c }
+        guard tabs.filter({ $0.bundleID == tab.bundleID }).count > 1 else { return nil }
+        if let t = tab.title, !t.isEmpty { return t }
+        return tab.name
+    }
+
     // MARK: Observation
 
     private func observeWorkspace() {
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] _ in
             self?.refreshRunning()
+            self?.syncWatcher()
         }
         nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
             self?.refreshRunning()
+            self?.refreshLiveWindows()
+            self?.syncWatcher()
         }
-        // Keep the highlight in sync when the user switches with ⌘Tab or the Dock,
-        // and fit that app's window next to the sidebar.
+        // ⌘Tab / Dock switches arrive as app activations; clicks between windows of the
+        // same app arrive through the WindowWatcher. Both end up in handleFocus.
         nc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
-            guard let self,
-                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  let id = app.bundleIdentifier
-            else { return }
-            if let p = self.pending {
-                if p.id == id || Date() > p.until {
-                    self.pending = nil
-                } else {
-                    // Focus briefly passing through another app during our own switch.
-                    return
-                }
-            }
-            guard self.tabs.contains(where: { $0.bundleID == id }),
-                  self.currentID != id,
-                  !app.isHidden,
-                  AX.isTrusted
-            else { return }
-            self.currentID = id
-            self.updateCurrent { $0.lastBundleID = id }
-            self.place(app)
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self?.handleFocus(pid: app.processIdentifier)
         }
+    }
+
+    /// Keeps the highlight in sync with the focused window and fits that window next to
+    /// the sidebar. A focused window that is no tab's yet is taken by an unbound tab of
+    /// the same app.
+    private func handleFocus(pid: pid_t) {
+        if let p = pending {
+            if Date() < p.until { return }
+            pending = nil
+        }
+        guard AX.isTrusted,
+              let app = NSRunningApplication(processIdentifier: pid), !app.isHidden,
+              let bundleID = app.bundleIdentifier,
+              tabs.contains(where: { $0.bundleID == bundleID }),
+              let w = AX.focusedWindow(pid: pid), let wid = AX.windowID(w)
+        else { return }
+        refreshLiveWindows()
+
+        if let tab = tabs.first(where: { $0.windowID == wid }) {
+            guard currentID != tab.id else { return }
+            currentID = tab.id
+            updateCurrent { $0.lastTabID = tab.id }
+            place(tab)
+        } else if let tab = tabs.first(where: { $0.bundleID == bundleID && !isBound($0) }),
+                  !claimedWindowIDs(except: tab.id).contains(wid) {
+            bind(tab.id, to: wid, title: AX.title(w))
+            currentID = tab.id
+            updateCurrent { $0.lastTabID = tab.id }
+            place(tab)
+        }
+    }
+
+    /// Focus is watched for every running app that backs a tab in any workspace.
+    private func syncWatcher() {
+        let ids = Set(allTabs.map(\.bundleID))
+        let pids = Set(ids.compactMap { runningApp($0)?.processIdentifier })
+        watcher.watch(AX.isTrusted ? pids : [])
     }
 
     private func refreshRunning() {
@@ -422,10 +626,38 @@ final class WorkspaceManager: ObservableObject {
         if ids != runningIDs { runningIDs = ids }
     }
 
+    private func refreshLiveWindows() {
+        let ids = AX.existingWindowIDs()
+        if ids != liveWindowIDs { liveWindowIDs = ids }
+    }
+
+    /// Keeps titles of the current workspace's windows fresh (a browser window's title
+    /// follows its active tab).
+    private func refreshTitles() {
+        let bound = tabs.filter { $0.windowID != nil }
+        for bundleID in Set(bound.map(\.bundleID)) {
+            guard let app = runningApp(bundleID) else { continue }
+            var titles: [CGWindowID: String] = [:]
+            for w in AX.windows(pid: app.processIdentifier) {
+                if let id = AX.windowID(w) { titles[id] = AX.title(w) }
+            }
+            for tab in bound where tab.bundleID == bundleID {
+                if let id = tab.windowID, let t = titles[id], !t.isEmpty, t != tab.title {
+                    updateTab(tab.id) { $0.title = t }
+                }
+            }
+        }
+    }
+
     private func tick() {
         let t = AX.isTrusted
-        if t != trusted { trusted = t }
+        if t != trusted {
+            trusted = t
+            syncWatcher()
+        }
+        refreshLiveWindows()
         guard t else { return }
+        refreshTitles()
         let b = AX.dockBadges()
         if b != badges { badges = b }
     }
@@ -452,7 +684,8 @@ final class WorkspaceManager: ObservableObject {
         } else {
             currentWorkspaceID = workspaces[0].id
         }
-        currentID = currentWorkspace.lastBundleID
+        currentID = currentWorkspace.lastTabID
+        save() // persists ids given to tabs migrated from the app-level format
     }
 
     private func save() {
@@ -469,7 +702,7 @@ final class WorkspaceManager: ObservableObject {
 
 /// Small modal dialogs. TabStack is a background (accessory) app, so it activates itself first.
 enum Dialogs {
-    static func prompt(title: String, message: String, value: String) -> String? {
+    static func prompt(title: String, message: String, value: String, allowEmpty: Bool = false) -> String? {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = title
@@ -482,7 +715,7 @@ enum Dialogs {
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? nil : text
+        return text.isEmpty && !allowEmpty ? nil : text
     }
 
     static func confirm(title: String, message: String) -> Bool {

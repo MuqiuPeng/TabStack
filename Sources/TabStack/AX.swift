@@ -1,6 +1,9 @@
 import Cocoa
 import ApplicationServices
 
+@_silgen_name("_AXUIElementGetWindow")
+private func _AXUIElementGetWindow(_ element: AXUIElement, _ id: inout CGWindowID) -> AXError
+
 /// Thin wrapper over the Accessibility API used to move, resize and raise
 /// windows that belong to other applications.
 enum AX {
@@ -56,6 +59,40 @@ enum AX {
 
     private static func isStandard(_ w: AXUIElement) -> Bool {
         (attr(w, kAXSubroleAttribute) as String?) == kAXStandardWindowSubrole
+    }
+
+    /// The WindowServer id of a window. Stable for the window's lifetime, which is what
+    /// lets a tab point at one specific window of an app (private but long-standing API,
+    /// used by most window managers).
+    static func windowID(_ w: AXUIElement) -> CGWindowID? {
+        var id: CGWindowID = 0
+        return _AXUIElementGetWindow(w, &id) == .success && id != 0 ? id : nil
+    }
+
+    /// The app's regular document windows (minimized ones included), front to back.
+    static func windows(pid: pid_t) -> [AXUIElement] {
+        let app = AXUIElementCreateApplication(pid)
+        let all: [AXUIElement] = attr(app, kAXWindowsAttribute) ?? []
+        return all.filter(isStandard)
+    }
+
+    static func title(_ w: AXUIElement) -> String {
+        (attr(w, kAXTitleAttribute) as String?) ?? ""
+    }
+
+    static func focusedWindow(pid: pid_t) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(pid)
+        if let w: AXUIElement = attr(app, kAXFocusedWindowAttribute), isStandard(w) { return w }
+        if let w: AXUIElement = attr(app, kAXMainWindowAttribute), isStandard(w) { return w }
+        return nil
+    }
+
+    /// Ids of every window that currently exists, on screen or not (hidden apps, minimized,
+    /// other Spaces). Needs no Accessibility permission.
+    static func existingWindowIDs() -> Set<CGWindowID> {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
+        else { return [] }
+        return Set(list.compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })
     }
 
     /// The window that best represents the app: main, then focused, then the first standard window.
