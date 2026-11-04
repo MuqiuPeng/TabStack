@@ -55,6 +55,32 @@ TabStack 不显示 Dock 图标和菜单栏，退出入口在侧边栏顶部的�
 - 同一个窗口可以同时出现在多个工作区里。
 - **只显示常用的工作区**：侧边栏默认最多显示 5 个（设置里可改），由当前工作区、固定的工作区和推荐分最高的组成。推荐用 frecency：每次切换和每停留 10 分钟各计一分，分数每 3 天减半。其余工作区不会删除，只是收起，用 `⌃⌥F` 或工作区菜单里的“其他工作区”打开。
 
+## 让 AI 配置工作区（MCP）
+
+`build/TabStack.app/Contents/MacOS/tabstack-mcp` 是一个 MCP 服务器（stdio），Claude Code 等助手可以用它直接为项目搭好工作区。它通过 TabStack 的本地控制通道（`~/Library/Application Support/TabStack/control.sock`，仅当前用户可读写）操作正在运行的 TabStack；TabStack 没开时会先启动它。
+
+在 Claude Code 里注册（所有项目可用）：
+
+```bash
+claude mcp add --scope user tabstack -- ~/projects/TabStack/build/TabStack.app/Contents/MacOS/tabstack-mcp
+```
+
+工具：
+
+| 工具 | 作用 |
+|---|---|
+| `list_workspaces` | 所有工作区及其窗口：是否打开、怎么恢复（文件夹 / 网址 / 文件）、是否显示在侧边栏、是否固定 |
+| `list_windows` | 当前打开的窗口（按应用分组，含 windowID、已在哪些工作区） |
+| `list_browser_profiles` | Chrome / Edge / Brave 的账号 |
+| `create_workspace` / `update_workspace` / `delete_workspace` | 新建、改名、改色、固定、排序、删除工作区 |
+| `switch_workspace` | 切换工作区（可指定窗口） |
+| `open_window` | 开一个新窗口并加入工作区：VS Code / Cursor 打开文件夹，终端在某目录打开，Finder 打开文件夹，浏览器用指定账号打开一组网址 |
+| `add_window` | 把已打开的窗口加入工作区 |
+| `update_tab` / `remove_tab` | 改名、移到别的工作区、调整顺序；移除（可同时关闭窗口） |
+| `restore_workspace` | 重新打开工作区里缺失的窗口 |
+
+例如对助手说：“为 ~/projects/foo 建一个工作区：VS Code 打开项目，终端进到项目目录，Chrome 用 Work 账号打开 localhost:3000 和 GitHub 仓库。”
+
 ## 已知限制
 
 - 侧边栏只停靠在主显示器

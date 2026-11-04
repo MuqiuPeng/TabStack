@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private lazy var settings = SettingsWindowController(manager: manager)
     private lazy var search = WorkspaceSearchController(manager: manager)
+    private lazy var control = ControlServer(manager: manager)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         manager = WorkspaceManager()
@@ -81,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         HotKeys.register()
+        control.start()
 
         if !AX.isTrusted { AX.requestTrust() }
 
@@ -176,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         manager.unhideAll()
+        control.stop()
     }
 
     /// Pins the panel to the left edge of the primary screen's visible area.

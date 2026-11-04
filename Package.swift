@@ -5,6 +5,8 @@ let package = Package(
     name: "TabStack",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "TabStack", path: "Sources/TabStack")
+        .executableTarget(name: "TabStack", path: "Sources/TabStack"),
+        // MCP server (stdio) that drives TabStack over its control socket.
+        .executableTarget(name: "tabstack-mcp", path: "Sources/tabstack-mcp"),
     ]
 )

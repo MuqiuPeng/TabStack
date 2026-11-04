@@ -16,8 +16,10 @@ APP=build/TabStack.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/TabStack "$APP/Contents/MacOS/TabStack"
+cp .build/release/tabstack-mcp "$APP/Contents/MacOS/tabstack-mcp"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+codesign --force --sign "${SIGN_IDENTITY:--}" "$APP/Contents/MacOS/tabstack-mcp"
 codesign --force --sign "${SIGN_IDENTITY:--}" "$APP"
 
 echo "Built $APP"

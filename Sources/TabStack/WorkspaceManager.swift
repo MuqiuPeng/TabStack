@@ -297,7 +297,7 @@ final class WorkspaceManager: ObservableObject {
     }
 
     /// Applies `change` to the tab with this id, in whichever workspace holds it.
-    private func updateTab(_ id: UUID, _ change: (inout AppTab) -> Void) {
+    func updateTab(_ id: UUID, _ change: (inout AppTab) -> Void) {
         for w in workspaces.indices {
             if let t = workspaces[w].tabs.firstIndex(where: { $0.id == id }) {
                 change(&workspaces[w].tabs[t])
@@ -455,10 +455,10 @@ final class WorkspaceManager: ObservableObject {
 
     // MARK: Windows of a tab
 
-    private var allTabs: [AppTab] { workspaces.flatMap(\.tabs) }
+    var allTabs: [AppTab] { workspaces.flatMap(\.tabs) }
 
     /// Windows that some tab (in any workspace) is bound to.
-    private func claimedWindowIDs(except tabID: UUID? = nil) -> Set<CGWindowID> {
+    func claimedWindowIDs(except tabID: UUID? = nil) -> Set<CGWindowID> {
         Set(allTabs.filter { $0.id != tabID }.compactMap(\.windowID))
     }
 
@@ -601,7 +601,7 @@ final class WorkspaceManager: ObservableObject {
 
     /// Binds every tab that has no live window to a window it recognizes. Never opens
     /// windows; runs in the background so tabs settle after restarts without a click.
-    private func bindUnboundTabs() {
+    func bindUnboundTabs() {
         guard AX.isTrusted else { return }
         refreshLiveWindows()
         // Tabs that remember a title go first, so they get their own window back.
@@ -914,7 +914,7 @@ final class WorkspaceManager: ObservableObject {
 
     // MARK: Settings window
 
-    private func update(_ workspaceID: UUID, _ change: (inout Workspace) -> Void) {
+    func update(_ workspaceID: UUID, _ change: (inout Workspace) -> Void) {
         guard let i = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
         change(&workspaces[i])
         save()
@@ -944,6 +944,18 @@ final class WorkspaceManager: ObservableObject {
 
     func setColor(_ id: UUID, _ color: Int) {
         update(id) { $0.color = color }
+    }
+
+    /// Deletes without asking (the control socket); leaves it first if it is current.
+    func removeWorkspace(_ id: UUID) {
+        guard workspaces.count > 1 else { return }
+        if id == currentWorkspaceID, let other = workspaces.first(where: { $0.id != id }) {
+            switchWorkspace(other.id)
+        }
+        workspaces.removeAll { $0.id == id }
+        save()
+        recomputeActive()
+        syncWatcher()
     }
 
     /// Deletes after confirmation; leaving the current workspace first if needed.
@@ -1011,33 +1023,68 @@ final class WorkspaceManager: ObservableObject {
     /// Opens a fresh window of a Finder/terminal/browser app and adds it to `workspaceID`
     /// once it appears.
     func createWindow(_ target: NewWindowTarget, in workspaceID: UUID) {
-        let windowIDs = { (bundleID: String) -> Set<CGWindowID> in
-            guard let app = self.runningApp(bundleID) else { return [] }
-            return Set(AX.windows(pid: app.processIdentifier).compactMap(AX.windowID))
+        openNewWindow(bundleID: target.bundleID, in: workspaceID, trigger: { NewWindow.open(target) }) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let tab):
+                if target.bundleID == "com.apple.finder", let app = self.runningApp(tab.bundleID) {
+                    // A new Finder window opens on 前往文件夹 so you can type where to go.
+                    self.after(0.6) { NewWindow.showGoToFolder(pid: app.processIdentifier) }
+                }
+            case .failure(let error):
+                HUD.shared.show(title: error.message, icon: self.icon(for: target.bundleID))
+            }
         }
-        let before = windowIDs(target.bundleID)
-        guard NewWindow.open(target) else {
-            HUD.shared.show(title: "无法新建\(target.name)窗口", icon: icon(for: target.bundleID))
-            return
+    }
+
+    struct OpenError: Error { let message: String }
+
+    /// Runs `trigger` (which should make `bundleID` open a window), waits for the new window
+    /// and adds it as a tab of `workspaceID`. `fallback` may pick an existing window when the
+    /// app reused one instead (VS Code focuses a folder that is already open).
+    func openNewWindow(bundleID: String, in workspaceID: UUID, name: String? = nil, reopen: Reopen? = nil,
+                       timeout: TimeInterval = 10, trigger: () -> Bool,
+                       fallback: (() -> AXUIElement?)? = nil,
+                       completion: @escaping (Result<AppTab, OpenError>) -> Void) {
+        let appName = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+            .map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") } ?? bundleID
+        let before: Set<CGWindowID> = runningApp(bundleID).map {
+            Set(AX.windows(pid: $0.processIdentifier).compactMap(AX.windowID))
+        } ?? []
+        guard trigger() else { completion(.failure(OpenError(message: "无法让\(appName)打开新窗口"))); return }
+        let deadline = Date().addingTimeInterval(timeout)
+        func finish(_ w: AXUIElement, _ app: NSRunningApplication) {
+            guard let id = AX.windowID(w) else { return }
+            addWindow(id, title: AX.title(w), of: app, to: workspaceID)
+            guard let tab = workspaces.first(where: { $0.id == workspaceID })?.tabs.first(where: { $0.windowID == id })
+            else { completion(.failure(OpenError(message: "窗口已打开，但没能加入工作区"))); return }
+            if name != nil || reopen != nil {
+                updateTab(tab.id) { t in
+                    if let name { t.customName = name }
+                    if let reopen { t.reopen = reopen }
+                }
+            }
+            completion(.success(allTabs.first { $0.id == tab.id } ?? tab))
         }
-        let deadline = Date().addingTimeInterval(10)
         func poll() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 guard let self else { return }
-                if let app = self.runningApp(target.bundleID),
+                if let app = self.runningApp(bundleID),
                    let w = AX.windows(pid: app.processIdentifier).first(where: {
                        guard let id = AX.windowID($0) else { return false }
                        return !before.contains(id)
-                   }), let id = AX.windowID(w) {
-                    self.addWindow(id, title: AX.title(w), of: app, to: workspaceID)
-                    if target.bundleID == "com.apple.finder" {
-                        // A new Finder window opens on 前往文件夹 so you can type where to go.
-                        self.after(0.6) { NewWindow.showGoToFolder(pid: app.processIdentifier) }
-                    }
+                   }) {
+                    finish(w, app)
+                    return
+                }
+                // Past half the wait, accept a window the app reused instead of opening one.
+                if Date() > deadline.addingTimeInterval(-timeout / 2), let app = self.runningApp(bundleID),
+                   let w = fallback?() {
+                    finish(w, app)
                     return
                 }
                 if Date() < deadline { poll() } else {
-                    HUD.shared.show(title: "没有等到新的\(target.name)窗口", icon: self.icon(for: target.bundleID))
+                    completion(.failure(OpenError(message: "没有等到新的\(appName)窗口")))
                 }
             }
         }
@@ -1139,7 +1186,7 @@ final class WorkspaceManager: ObservableObject {
     }
 
     /// Focus is watched for every running app that backs a tab in any workspace.
-    private func syncWatcher() {
+    func syncWatcher() {
         let ids = Set(allTabs.map(\.bundleID))
         let pids = Set(ids.compactMap { runningApp($0)?.processIdentifier })
         watcher.watch(AX.isTrusted ? pids : [])
@@ -1232,7 +1279,7 @@ final class WorkspaceManager: ObservableObject {
         UserDefaults.standard.set(currentWorkspaceID.uuidString, forKey: Keys.current)
     }
 
-    private func after(_ seconds: Double, _ work: @escaping () -> Void) {
+    func after(_ seconds: Double, _ work: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 }
