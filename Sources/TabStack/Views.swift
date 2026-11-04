@@ -372,6 +372,10 @@ struct TabButton: View {
             }
             Divider()
             pairMenu
+            if tab.bundleID == ClaudeSessions.bundleID || partner?.bundleID == ClaudeSessions.bundleID,
+               let ws = manager.workspace(on: display) {
+                ClaudeSessionMenu(manager: manager, workspace: ws)
+            }
             Divider()
             Button("上移") { manager.move(tab, by: -1) }.disabled(index == 0)
             Button("下移") { manager.move(tab, by: 1) }
@@ -718,5 +722,42 @@ private struct WorkspaceColumn: View {
         .onTapGesture { manager.switchWorkspace(workspace.id) }
         .animation(Motion.press, value: hovering)
         .help("\(workspace.name)（点击切换）")
+    }
+}
+
+
+/// Which Claude Code session a workspace's Claude tab shows.
+struct ClaudeSessionMenu: View {
+    @ObservedObject var manager: WorkspaceManager
+    let workspace: Workspace
+
+    var body: some View {
+        let sessions = ClaudeSessions.recent()
+        let matches = ClaudeSessions.matching(workspace, in: sessions)
+        let others = sessions.filter { s in !matches.contains(s) }.prefix(12)
+        let chosen = workspace.claudeSession
+        Menu("Claude 会话") {
+            Toggle(isOn: Binding(get: { chosen == nil },
+                                 set: { if $0 { manager.setClaudeSession(nil, for: workspace.id) } })) {
+                Text(matches.first.map { "自动：\($0.title)" } ?? "自动（按项目文件夹）")
+            }
+            if !matches.isEmpty {
+                Divider()
+                Text("这个项目")
+                ForEach(matches.prefix(12)) { item($0, chosen) }
+            }
+            if !others.isEmpty {
+                Divider()
+                Text("其他最近的会话")
+                ForEach(Array(others)) { item($0, chosen) }
+            }
+        }
+    }
+
+    private func item(_ s: ClaudeSessions.Session, _ chosen: String?) -> some View {
+        Toggle(isOn: Binding(get: { chosen == s.id },
+                             set: { _ in manager.setClaudeSession(s.id, for: workspace.id) })) {
+            Text("\(s.title) — \((s.cwd as NSString).lastPathComponent)")
+        }
     }
 }

@@ -70,6 +70,8 @@ struct Workspace: Identifiable, Codable, Equatable {
     var pinned: Bool?
     /// When it was used (seconds since 1970), newest last; feeds the frecency ranking.
     var usage: [Double]?
+    /// Claude Code session (local_…) its Claude tab shows; nil picks one by project folder.
+    var claudeSession: String?
 }
 
 /// Which workspaces the sidebar shows: only a few are kept at hand, the rest stay saved and
@@ -349,6 +351,7 @@ final class WorkspaceManager: ObservableObject {
         if let app = runningApp(tab.bundleID) {
             app.unhide()
             AX.activate(app)
+            syncClaudeSession(showing: tab)
             place(tab)
         } else {
             launch(tab)
@@ -481,7 +484,8 @@ final class WorkspaceManager: ObservableObject {
 
     /// Windows that some tab (in any workspace) is bound to.
     func claimedWindowIDs(except tabID: UUID? = nil) -> Set<CGWindowID> {
-        Set(allTabs.filter { $0.id != tabID }.compactMap(\.windowID))
+        // Claude's one window is shared: each workspace's Claude tab shows it on its own session.
+        Set(allTabs.filter { $0.id != tabID && $0.bundleID != ClaudeSessions.bundleID }.compactMap(\.windowID))
     }
 
     func isBound(_ tab: AppTab) -> Bool {
@@ -1502,6 +1506,8 @@ final class WorkspaceManager: ObservableObject {
     /// The other display a focused window belongs to: by its tab, else by where it is.
     private func display(ofWindow wid: CGWindowID, _ w: AXUIElement) -> DisplayKey? {
         guard !otherDisplays.isEmpty else { return nil }
+        // A shared window (Claude) may be a tab here and there; here wins.
+        if tabs.contains(where: { $0.windowID == wid }) { return nil }
         for (d, state) in otherDisplays {
             if workspaces.first(where: { $0.id == state.workspace })?.tabs.contains(where: { $0.windowID == wid }) == true {
                 return d
@@ -1621,6 +1627,57 @@ final class WorkspaceManager: ObservableObject {
             }
         }
         if let top { AX.raise(top) }
+    }
+
+    // MARK: Claude sessions
+
+    /// The session TabStack last sent Claude to, trusted over Claude's own record for a few
+    /// seconds (Claude writes which session has focus with a delay).
+    private var claudeSent: (id: String, at: Date)?
+
+    /// When the Claude window is about to show (alone or as half of a pair), switches Claude
+    /// to the current workspace's session.
+    private func syncClaudeSession(showing tab: AppTab) {
+        guard ClaudeSessions.syncEnabled else { return }
+        let claude = ClaudeSessions.bundleID
+        guard tab.bundleID == claude || (isWide(focusedDisplay) && partner(of: tab)?.bundleID == claude),
+              runningApp(claude) != nil else { return }
+        let ws = currentWorkspace
+        let sent = claudeSent.flatMap { Date().timeIntervalSince($0.at) < 5 ? $0.id : nil }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let sessions = ClaudeSessions.all()
+            let shown = sent ?? ClaudeSessions.focused(in: sessions)?.id
+            let target: String?
+            if let chosen = ws.claudeSession, sessions.contains(where: { $0.id == chosen }) {
+                target = chosen
+            } else {
+                let matches = ClaudeSessions.matching(ws, in: sessions)
+                // Already on one of this project's sessions: leave it there.
+                target = matches.contains { $0.id == shown } ? nil : matches.first?.id
+            }
+            guard let target, target != shown else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.currentWorkspaceID == ws.id else { return }
+                self.claudeSent = (target, Date())
+                ClaudeSessions.open(target)
+            }
+        }
+    }
+
+    /// Pins a workspace's Claude tab to a session (nil: pick by project folder) and shows it
+    /// now if that tab is in front.
+    func setClaudeSession(_ id: String?, for workspaceID: UUID) {
+        update(workspaceID) { $0.claudeSession = id }
+        guard workspaceID == currentWorkspaceID,
+              let tab = tabs.first(where: { $0.id == currentID }) else { return }
+        if let id {
+            let claude = ClaudeSessions.bundleID
+            guard tab.bundleID == claude || partner(of: tab)?.bundleID == claude else { return }
+            claudeSent = (id, Date())
+            ClaudeSessions.open(id)
+        } else {
+            syncClaudeSession(showing: tab)
+        }
     }
 
     func after(_ seconds: Double, _ work: @escaping () -> Void) {

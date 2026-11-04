@@ -179,6 +179,7 @@ final class ControlCommands {
             "tabs": ws.tabs.map(describe),
         ]
         if let c = ws.color { d["color"] = c }
+        if let s = ws.claudeSession { d["claudeSession"] = s }
         if let i = m.activeWorkspaces.firstIndex(of: ws), i < 9 { d["hotkey"] = "⌃⌥\(i + 1)" }
         return d
     }
@@ -258,6 +259,11 @@ final class ControlCommands {
         }
         if let c = p["color"] as? Int { m.setColor(ws.id, c % WorkspaceColor.palette.count) }
         if let pinned = p["pinned"] as? Bool { m.setPinned(ws.id, pinned) }
+        if let s = p["claudeSession"] as? String {
+            guard s.isEmpty || s.range(of: #"^local_[A-Za-z0-9-]{1,64}$"#, options: .regularExpression) != nil
+            else { throw Failure("claudeSession must look like local_…, or be empty") }
+            m.setClaudeSession(s.isEmpty ? nil : s, for: ws.id)
+        }
         if let pos = p["position"] as? Int, let from = m.workspaces.firstIndex(where: { $0.id == ws.id }) {
             let to = min(max(pos - 1, 0), m.workspaces.count - 1)
             m.moveWorkspaces(from: IndexSet(integer: from), to: to > from ? to + 1 : to)

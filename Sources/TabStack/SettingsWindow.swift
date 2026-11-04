@@ -316,6 +316,7 @@ private struct GeneralSettings: View {
     @ObservedObject var manager: WorkspaceManager
     @AppStorage("switchAnimation") private var curtain = true
     @AppStorage("restoreOnSwitch") private var restoreOnSwitch = true
+    @AppStorage("syncClaudeSession") private var syncClaudeSession = true
     @AppStorage("activeWorkspaceLimit") private var limit = 5
     @AppStorage("splitMinWidth") private var splitMinWidth = 2400.0
 
@@ -347,6 +348,13 @@ private struct GeneralSettings: View {
                     get: { splitMinWidth },
                     set: { splitMinWidth = $0; manager.layoutChanged() }), in: 1200...6000, step: 200)
                 Text(widthHint)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Claude") {
+                Toggle("显示 Claude 标签时切换到工作区对应的会话", isOn: $syncClaudeSession)
+                Text("Claude 的窗口可以同时放进多个工作区。默认按项目文件夹找最近的 Claude Code 会话；在标签上右键 →「Claude 会话」可以固定某一个。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

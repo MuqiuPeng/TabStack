@@ -108,6 +108,11 @@ Other behaviour:
   least 2400 points wide (configurable in settings) the pair fills the content
   area half and half; on narrower ones only the half you last used is shown.
   Pairing is optional — other tabs keep the whole area.
+- **Claude sessions follow the workspace**: the Claude desktop window can be a
+  tab in several workspaces. Whenever it is shown, Claude switches to that
+  workspace's Claude Code session — by default the latest one working in the
+  project's folder, or one you pick (right-click the tab → **Claude 会话**).
+  Uses Claude's `claude://code/continue` link; turn it off in settings.
 - **Several displays**: each display gets its own sidebar and shows its own
   workspace; two displays never show the same one. Hotkeys and menus act on the
   display you last clicked or worked in. Switching to a workspace another
