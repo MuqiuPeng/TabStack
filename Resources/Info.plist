@@ -22,6 +22,8 @@
     <true/>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>TabStack 读取浏览器窗口里的标签页网址，以便在重启后恢复这些窗口。</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSPrincipalClass</key>

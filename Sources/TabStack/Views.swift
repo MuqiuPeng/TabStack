@@ -146,7 +146,7 @@ struct WorkspaceMenu: View {
         menu.addItem(ClosureMenuItem("下移工作区", enabled: index < m.workspaces.count - 1) { m.moveCurrentWorkspace(by: 1) })
         menu.addItem(ClosureMenuItem("删除“\(current.name)”…", enabled: m.workspaces.count > 1) { m.deleteCurrentWorkspace() })
         menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem("启动本工作区所有应用") { m.launchAllInWorkspace() })
+        menu.addItem(ClosureMenuItem("恢复本工作区窗口") { m.restoreMissingWindows(in: current.id) })
         let toggle = ClosureMenuItem("隐藏侧边栏") { m.onToggleSidebar?() }
         toggle.keyEquivalent = "0"
         toggle.keyEquivalentModifierMask = [.command, .option]
@@ -279,8 +279,9 @@ struct TabButton: View {
     private var tooltip: String {
         var text = tab.name
         if let title = tab.customName ?? tab.title, !title.isEmpty, title != tab.name { text += " — \(title)" }
-        if !manager.isBound(tab) && manager.runningIDs.contains(tab.bundleID) && tab.windowID != nil {
-            text += "（窗口已关闭，点击重新绑定）"
+        if !manager.isBound(tab) {
+            if manager.isRestorable(tab) { text += "（窗口未打开，点击恢复）" }
+            else if manager.runningIDs.contains(tab.bundleID) && tab.windowID != nil { text += "（窗口已关闭，点击重新绑定）" }
         }
         if index < 9 { text += "   ⌥⌘\(index + 1)" }
         return text

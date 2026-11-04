@@ -190,6 +190,12 @@ private struct WorkspaceDetail: View {
                         .foregroundColor(.secondary)
                     Spacer()
                     Button {
+                        manager.restoreMissingWindows(in: workspaceID)
+                    } label: {
+                        Label("恢复缺失窗口", systemImage: "arrow.counterclockwise")
+                    }
+                    .help("重新打开这个工作区里已关闭的窗口（比如重启之后）")
+                    Button {
                         WindowPicker.popUp(manager: manager, workspaceID: workspaceID)
                     } label: {
                         Label("添加窗口…", systemImage: "plus")
@@ -275,12 +281,16 @@ private struct TabSettingsRow: View {
             state = "应用未运行"
         } else if manager.isBound(tab) {
             state = (tab.customName != nil && tab.title?.isEmpty == false) ? tab.title! : "窗口已绑定"
+        } else if let summary = tab.reopen?.summary {
+            state = "窗口未打开 · 可恢复：\(summary)"
         } else if tab.windowID == nil {
             state = "等待绑定窗口"
         } else {
             state = "窗口已关闭，下次使用时重新绑定"
         }
-        return "\(tab.name) · \(state)"
+        var text = "\(tab.name) · \(state)"
+        if manager.isBound(tab), let summary = tab.reopen?.summary { text += " · 重启后可恢复：\(summary)" }
+        return text
     }
 }
 
@@ -289,12 +299,20 @@ private struct TabSettingsRow: View {
 private struct GeneralSettings: View {
     @ObservedObject var manager: WorkspaceManager
     @AppStorage("switchAnimation") private var curtain = true
+    @AppStorage("restoreOnSwitch") private var restoreOnSwitch = true
 
     var body: some View {
         Form {
             Section("切换") {
                 Toggle("切换窗口时显示磨砂过渡", isOn: $curtain)
                 Text("系统开启“减弱动态效果”时，所有动画会改为淡入淡出。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("恢复") {
+                Toggle("切换工作区时自动恢复缺失的窗口", isOn: $restoreOnSwitch)
+                Text("TabStack 会记住每个窗口怎么重新打开：VS Code 记项目文件夹，Chrome 记所有标签页网址，文档窗口记文件。重启后会先认回已经自动恢复的窗口，真正缺失的才重新打开。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

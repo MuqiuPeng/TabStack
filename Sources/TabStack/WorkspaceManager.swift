@@ -18,6 +18,8 @@ struct AppTab: Identifiable, Codable, Equatable {
     /// Last seen window title, used for display and for re-binding.
     var title: String?
     var windowID: CGWindowID?
+    /// How to reopen this window after a restart (folder, URLs or file).
+    var reopen: Reopen?
 
     init(bundleID: String, name: String, title: String? = nil, windowID: CGWindowID? = nil) {
         self.id = UUID()
@@ -27,7 +29,7 @@ struct AppTab: Identifiable, Codable, Equatable {
         self.windowID = windowID
     }
 
-    enum CodingKeys: String, CodingKey { case id, bundleID, name, customName, title, windowID }
+    enum CodingKeys: String, CodingKey { case id, bundleID, name, customName, title, windowID, reopen }
 
     /// Also reads tabs saved by the app-level version (no id / window fields).
     init(from decoder: Decoder) throws {
@@ -38,6 +40,7 @@ struct AppTab: Identifiable, Codable, Equatable {
         customName = try c.decodeIfPresent(String.self, forKey: .customName)
         title = try c.decodeIfPresent(String.self, forKey: .title)
         windowID = try c.decodeIfPresent(CGWindowID.self, forKey: .windowID)
+        reopen = try c.decodeIfPresent(Reopen.self, forKey: .reopen)
     }
 
     /// Identity is the tab, not its changing title.
@@ -255,6 +258,9 @@ final class WorkspaceManager: ObservableObject {
         if let target = next.tabs.first(where: { $0.id == tabID })
             ?? next.tabs.first(where: { $0.id == next.lastTabID }) ?? next.tabs.first {
             select(target, alsoHide: leaving)
+            if UserDefaults.standard.object(forKey: "restoreOnSwitch") as? Bool ?? true {
+                after(0.6) { [weak self] in self?.restoreMissingWindows(in: id, except: target.id) }
+            }
         } else {
             // Empty workspace: nothing to show, just put the old set away.
             for id in leaving { runningApp(id)?.hide() }
@@ -297,18 +303,6 @@ final class WorkspaceManager: ObservableObject {
         save()
     }
 
-    /// Starts every app of the current workspace that is not running yet, hidden.
-    func launchAllInWorkspace() {
-        let current = currentTab?.bundleID
-        for id in Set(tabs.map(\.bundleID)) where runningApp(id) == nil && id != current {
-            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { continue }
-            let config = NSWorkspace.OpenConfiguration()
-            config.activates = false
-            config.hides = true
-            NSWorkspace.shared.openApplication(at: url, configuration: config)
-        }
-    }
-
     // MARK: Windows of a tab
 
     private var allTabs: [AppTab] { workspaces.flatMap(\.tabs) }
@@ -330,31 +324,133 @@ final class WorkspaceManager: ObservableObject {
 
     private enum Resolution {
         case window(AXUIElement)
+        /// A restore was started (or is in progress) and its window hasn't appeared yet.
+        case restoring
         /// The app has no windows at all (yet).
         case noWindows
         /// Every window of the app already belongs to another tab.
         case allClaimed
+        /// Nothing matches and the tab knows how to reopen its own window, so it must not
+        /// grab an unrelated one (background passes only).
+        case unmatched
     }
 
-    /// Finds the tab's window, re-binding an unbound tab when needed.
-    private func resolve(_ tab: AppTab, pid: pid_t) -> Resolution {
+    /// Restores in flight: windows the app had before (anything else is new) and when to
+    /// give up. `background` restores hide their app once the window is bound.
+    private var restoring: [UUID: (before: Set<CGWindowID>, until: Date, wasRunning: Bool, background: Bool)] = [:]
+
+    func isRestorable(_ tab: AppTab) -> Bool { !(tab.reopen?.isEmpty ?? true) }
+
+    /// Finds the tab's window, re-binding an unbound tab when needed. `interactive` (the user
+    /// asked for this tab) may start a restore; background passes only recognize windows.
+    private func resolve(_ tab: AppTab, pid: pid_t, interactive: Bool) -> Resolution {
         let windows = AX.windows(pid: pid)
-        if windows.isEmpty { return .noWindows }
         if let id = tab.windowID, let w = windows.first(where: { AX.windowID($0) == id }) {
             return .window(w)
         }
         let claimed = claimedWindowIDs(except: tab.id)
         let free = windows.filter { AX.windowID($0).map { !claimed.contains($0) } ?? false }
-        guard let pick = free.first(where: { !(tab.title ?? "").isEmpty && AX.title($0) == tab.title }) ?? free.first,
-              let id = AX.windowID(pick)
-        else { return .allClaimed }
-        bind(tab.id, to: id, title: AX.title(pick))
-        return .window(pick)
+
+        // 1. A window that is recognizably this tab's (title, project folder, file, URLs).
+        if let w = match(tab, among: free) { return bindResolved(tab, w) }
+
+        // 2. A window that appeared since our restore started.
+        if let r = restoring[tab.id] {
+            if AppKind.of(tab.bundleID) != .editor, r.wasRunning,
+               let w = free.first(where: { AX.windowID($0).map { !r.before.contains($0) } ?? false }) {
+                return bindResolved(tab, w)
+            }
+            if Date() < r.until { return .restoring }
+            restoring[tab.id] = nil
+        }
+
+        // 3. Reopen what the tab remembers instead of taking someone else's window.
+        if isRestorable(tab) {
+            guard interactive else { return .unmatched }
+            startRestore(tab, background: false)
+            return .restoring
+        }
+
+        // 4. Apps without a recipe: any free window will do.
+        if windows.isEmpty { return .noWindows }
+        guard let pick = free.first else { return .allClaimed }
+        return bindResolved(tab, pick)
     }
 
-    /// Binds every tab that has no live window to one of its app's free windows
-    /// (same title first). Runs in the background so migrated or orphaned tabs settle
-    /// without needing a click.
+    private func bindResolved(_ tab: AppTab, _ w: AXUIElement) -> Resolution {
+        guard let id = AX.windowID(w) else { return .unmatched }
+        bind(tab.id, to: id, title: AX.title(w))
+        if let r = restoring.removeValue(forKey: tab.id), r.background,
+           tab.bundleID != currentTab?.bundleID {
+            runningApp(tab.bundleID)?.hide() // restored for later; keep it out of the way
+        }
+        return .window(w)
+    }
+
+    /// The free window that is recognizably this tab's, if any.
+    private func match(_ tab: AppTab, among free: [AXUIElement]) -> AXUIElement? {
+        if let t = tab.title, !t.isEmpty, let w = free.first(where: { AX.title($0) == t }) { return w }
+        guard let reopen = tab.reopen else { return nil }
+
+        if let folder = reopen.folder {
+            let name = (folder as NSString).lastPathComponent
+            if let w = free.first(where: { Restore.editorRootName(fromTitle: AX.title($0)) == name }) { return w }
+        }
+        if let doc = reopen.document, let w = free.first(where: { Restore.document(of: $0) == doc }) {
+            return w
+        }
+        if let urls = reopen.urls, !urls.isEmpty, let cache = browserCache[tab.bundleID]?.windows {
+            let wanted = Set(urls)
+            var best: (AXUIElement, Int)?
+            for w in free {
+                guard let entry = browserEntry(forWindowTitle: AX.title(w), in: cache) else { continue }
+                let overlap = wanted.intersection(entry.urls).count
+                if overlap > 0, overlap > (best?.1 ?? 0) { best = (w, overlap) }
+            }
+            if let best { return best.0 }
+        }
+        return nil
+    }
+
+    /// Opens the tab's window again from its recipe, or launches its app.
+    private func startRestore(_ tab: AppTab, background: Bool) {
+        let app = runningApp(tab.bundleID)
+        let before = app.map { Set(AX.windows(pid: $0.processIdentifier).compactMap(AX.windowID)) } ?? []
+        restoring[tab.id] = (before, Date().addingTimeInterval(12), app != nil, background)
+        if let reopen = tab.reopen, Restore.perform(reopen, bundleID: tab.bundleID, activate: !background) {
+            return
+        }
+        if app == nil, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: tab.bundleID) {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = !background
+            NSWorkspace.shared.openApplication(at: url, configuration: config)
+        }
+    }
+
+    /// Brings back every missing window of a workspace (e.g. after a restart), one after
+    /// another so new windows can be told apart.
+    func restoreMissingWindows(in workspaceID: UUID, except skip: UUID? = nil) {
+        guard AX.isTrusted, let ws = workspaces.first(where: { $0.id == workspaceID }) else { return }
+        bindUnboundTabs()
+        let missing = ws.tabs.filter { tab in
+            tab.id != skip && !isBound(tab) && restoring[tab.id] == nil
+                && (isRestorable(tab) || !runningIDs.contains(tab.bundleID))
+        }
+        for (i, tab) in missing.enumerated() {
+            after(Double(i) * 1.2) { [weak self] in
+                guard let self, let live = self.allTabs.first(where: { $0.id == tab.id }), !self.isBound(live)
+                else { return }
+                self.startRestore(live, background: true)
+            }
+        }
+        // Bind the restored windows as they show up.
+        for delay in stride(from: 1.5, through: Double(missing.count) * 1.2 + 8, by: 1.5) {
+            after(delay) { [weak self] in self?.bindUnboundTabs() }
+        }
+    }
+
+    /// Binds every tab that has no live window to a window it recognizes. Never opens
+    /// windows; runs in the background so tabs settle after restarts without a click.
     private func bindUnboundTabs() {
         guard AX.isTrusted else { return }
         refreshLiveWindows()
@@ -363,7 +459,7 @@ final class WorkspaceManager: ObservableObject {
             .sorted { ($0.title?.isEmpty == false ? 0 : 1) < ($1.title?.isEmpty == false ? 0 : 1) }
         for tab in unbound {
             guard let app = runningApp(tab.bundleID) else { continue }
-            _ = resolve(tab, pid: app.processIdentifier)
+            _ = resolve(tab, pid: app.processIdentifier, interactive: false)
         }
     }
 
@@ -373,6 +469,72 @@ final class WorkspaceManager: ObservableObject {
             $0.title = title
         }
         liveWindowIDs.insert(windowID)
+    }
+
+    // MARK: Reopen recipes
+
+    /// Last seen windows of each running browser (title + tab URLs), read via AppleScript.
+    private var browserCache: [String: (time: Date, windows: [(title: String, urls: [String])])] = [:]
+    private var browserReads: Set<String> = []
+
+    private func refreshBrowserCache(_ bundleID: String, then done: (() -> Void)? = nil) {
+        guard !browserReads.contains(bundleID) else { return }
+        browserReads.insert(bundleID)
+        // NSAppleScript is main-thread only; deferred so it never runs inside a caller's work.
+        DispatchQueue.main.async { [weak self] in
+            let windows = Restore.browserWindows(bundleID: bundleID)
+            guard let self else { return }
+            self.browserReads.remove(bundleID)
+            self.browserCache[bundleID] = (Date(), windows)
+            done?()
+        }
+    }
+
+    /// The scripted browser window behind an AX window. Chrome's AX title is the active
+    /// tab's title plus extras (" - Google Chrome – <profile>", tab group), so it matches
+    /// by prefix; the longest title wins.
+    private func browserEntry(forWindowTitle axTitle: String,
+                              in cache: [(title: String, urls: [String])]) -> (title: String, urls: [String])? {
+        cache.filter { !$0.title.isEmpty && axTitle.hasPrefix($0.title) }
+            .max { $0.title.count < $1.title.count }
+    }
+
+    /// Records, for every bound tab, how to reopen its window later.
+    private func captureRecipes() {
+        guard AX.isTrusted else { return }
+        let bound = allTabs.filter(isBound)
+        for bundleID in Set(bound.map(\.bundleID)) {
+            guard let app = runningApp(bundleID) else { continue }
+            var byID: [CGWindowID: AXUIElement] = [:]
+            for w in AX.windows(pid: app.processIdentifier) { if let id = AX.windowID(w) { byID[id] = w } }
+            let tabs = bound.filter { $0.bundleID == bundleID }
+
+            switch AppKind.of(bundleID) {
+            case .editor:
+                for tab in tabs {
+                    guard let id = tab.windowID, let w = byID[id],
+                          let folder = Restore.editorFolder(window: w, title: AX.title(w), bundleID: bundleID),
+                          tab.reopen?.folder != folder else { continue }
+                    updateTab(tab.id) { $0.reopen = Reopen(folder: folder) }
+                }
+            case .browser:
+                refreshBrowserCache(bundleID) { [weak self] in
+                    guard let self, let cache = self.browserCache[bundleID]?.windows else { return }
+                    for tab in tabs {
+                        guard let id = tab.windowID, let w = byID[id] else { continue }
+                        guard let urls = self.browserEntry(forWindowTitle: AX.title(w), in: cache)?.urls, !urls.isEmpty,
+                              self.allTabs.first(where: { $0.id == tab.id })?.reopen?.urls != urls else { continue }
+                        self.updateTab(tab.id) { $0.reopen = Reopen(urls: urls) }
+                    }
+                }
+            case .other:
+                for tab in tabs {
+                    guard let id = tab.windowID, let w = byID[id],
+                          let doc = Restore.document(of: w), tab.reopen?.document != doc else { continue }
+                    updateTab(tab.id) { $0.reopen = Reopen(document: doc) }
+                }
+            }
+        }
     }
 
     // MARK: Placement
@@ -397,9 +559,8 @@ final class WorkspaceManager: ObservableObject {
 
     private var contentFrameAX: CGRect? { contentFrameCocoa.map(AX.toAX) }
 
-    /// Fits the tab's window into the content area and raises it. Apps that are still
-    /// launching or have no window are retried for a few seconds; halfway through, a
-    /// "reopen" is sent, which makes most apps open a new window.
+    /// Fits the tab's window into the content area and raises it. A window that is gone is
+    /// restored from the tab's recipe; apps that are still launching are retried for a while.
     private func place(_ tab: AppTab) {
         placeToken += 1
         place(tabID: tab.id, token: placeToken, attempt: 0)
@@ -407,15 +568,24 @@ final class WorkspaceManager: ObservableObject {
 
     private func place(tabID: UUID, token: Int, attempt: Int) {
         guard token == placeToken else { return }
-        guard let tab = allTabs.first(where: { $0.id == tabID }),
-              let app = runningApp(tab.bundleID), !app.isTerminated,
-              let frame = contentFrameAX
+        guard let tab = allTabs.first(where: { $0.id == tabID }), let frame = contentFrameAX
         else { SwitchCurtain.shared.reveal(); return }
 
-        switch resolve(tab, pid: app.processIdentifier) {
+        guard let app = runningApp(tab.bundleID), !app.isTerminated else {
+            // App still starting from a restore: keep waiting for it.
+            if restoring[tabID] != nil, attempt >= 0, attempt < 100 {
+                after(0.15) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1) }
+            } else {
+                SwitchCurtain.shared.reveal()
+            }
+            return
+        }
+
+        switch resolve(tab, pid: app.processIdentifier, interactive: attempt >= 0) {
         case .window(let w):
             // A full-screen window lives in its own Space; leave it alone.
             if AX.isFullScreen(w) { SwitchCurtain.shared.reveal(); return }
+            app.unhide()
             AX.setFrame(w, frame)
             AX.raise(w)
             if attempt >= 0 {
@@ -424,7 +594,17 @@ final class WorkspaceManager: ObservableObject {
                 after(0.25) { [weak self] in self?.place(tabID: tabID, token: token, attempt: -1) }
             }
 
-        case .allClaimed:
+        case .restoring:
+            guard attempt >= 0, attempt < 100 else { SwitchCurtain.shared.reveal(); return }
+            if attempt == 0 {
+                SwitchCurtain.shared.reveal()
+                HUD.shared.show(title: "正在恢复 \(tab.displayName)", subtitle: tab.reopen?.summary,
+                                icon: icon(for: tab.bundleID))
+            }
+            if AppKind.of(tab.bundleID) == .browser, attempt % 6 == 5 { refreshBrowserCache(tab.bundleID) }
+            after(0.15) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1) }
+
+        case .allClaimed, .unmatched:
             SwitchCurtain.shared.reveal()
             HUD.shared.show(title: "\(tab.name) 没有空闲的窗口",
                             subtitle: "这个标签的窗口已关闭，请在 \(tab.name) 里新建一个窗口",
@@ -445,6 +625,11 @@ final class WorkspaceManager: ObservableObject {
     }
 
     private func launch(_ tab: AppTab) {
+        if isRestorable(tab) {
+            startRestore(tab, background: false)
+            place(tab)
+            return
+        }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: tab.bundleID) else {
             NSSound.beep()
             SwitchCurtain.shared.reveal()
@@ -746,7 +931,8 @@ final class WorkspaceManager: ObservableObject {
             currentID = tab.id
             updateCurrent { $0.lastTabID = tab.id }
             place(tab)
-        } else if let tab = tabs.first(where: { $0.bundleID == bundleID && !isBound($0) }),
+        } else if let tab = tabs.first(where: { $0.bundleID == bundleID && !isBound($0)
+                    && (!isRestorable($0) || match($0, among: [w]) != nil) }),
                   !claimedWindowIDs(except: tab.id).contains(wid) {
             bind(tab.id, to: wid, title: AX.title(w))
             currentID = tab.id
@@ -790,7 +976,10 @@ final class WorkspaceManager: ObservableObject {
         }
     }
 
+    private var tickCount = 0
+
     private func tick() {
+        tickCount += 1
         let t = AX.isTrusted
         if t != trusted {
             trusted = t
@@ -800,6 +989,7 @@ final class WorkspaceManager: ObservableObject {
         guard t else { return }
         bindUnboundTabs()
         refreshTitles()
+        if tickCount % 5 == 1 { captureRecipes() }
         let b = AX.dockBadges()
         if b != badges { badges = b }
     }
