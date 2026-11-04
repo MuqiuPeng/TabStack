@@ -25,6 +25,9 @@ final class WorkspaceManager: ObservableObject {
     @Published private(set) var workspaces: [Workspace] = []
     @Published private(set) var currentWorkspaceID = UUID()
     @Published private(set) var currentID: String?
+    /// +1 when the last workspace switch went to a later workspace, -1 to an earlier one;
+    /// drives the direction of the sidebar's page transition.
+    @Published private(set) var workspaceDirection = 1
     @Published private(set) var runningIDs: Set<String> = []
     @Published private(set) var badges: [String: String] = [:]
     @Published private(set) var trusted = AX.isTrusted
@@ -70,14 +73,31 @@ final class WorkspaceManager: ObservableObject {
 
     // MARK: Switching apps
 
-    func select(_ tab: AppTab) {
+    /// Switches to `tab`. `alsoHide` lists extra apps to hide in the same motion (the
+    /// apps of the workspace being left).
+    func select(_ tab: AppTab, alsoHide: [String] = []) {
         currentID = tab.bundleID
         updateCurrent { $0.lastBundleID = tab.bundleID }
         guard AX.isTrusted else { AX.requestTrust(); return }
 
         // While this switch settles, activations of other apps are side effects of it
         // (see the activation observer) and must not change the selection.
-        pending = (tab.bundleID, Date().addingTimeInterval(1.0))
+        pending = (tab.bundleID, Date().addingTimeInterval(1.2))
+
+        // The sidebar highlight already moved; the windows change behind the curtain.
+        // Nothing to cover when the target is already the app in front.
+        let alreadyFront = runningApp(tab.bundleID)?.isActive == true && alsoHide.isEmpty
+        if !alreadyFront, let frame = contentFrameCocoa {
+            SwitchCurtain.shared.cover(frame, icon: icon(for: tab.bundleID)) { [weak self] in
+                self?.performSwitch(to: tab, alsoHide: alsoHide)
+            }
+        } else {
+            performSwitch(to: tab, alsoHide: alsoHide)
+        }
+    }
+
+    private func performSwitch(to tab: AppTab, alsoHide: [String]) {
+        guard currentID == tab.bundleID else { return } // superseded by a newer switch
 
         // Activate the target *before* hiding the others: hiding the frontmost app makes
         // macOS hand focus to some other app first, which used to hijack the selection.
@@ -89,9 +109,8 @@ final class WorkspaceManager: ObservableObject {
             launch(tab)
         }
 
-        for other in tabs where other.bundleID != tab.bundleID {
-            runningApp(other.bundleID)?.hide()
-        }
+        let others = Set(tabs.map(\.bundleID) + alsoHide).subtracting([tab.bundleID])
+        for id in others { runningApp(id)?.hide() }
     }
 
     /// The selection in progress and until when it is considered settling.
@@ -129,16 +148,21 @@ final class WorkspaceManager: ObservableObject {
 
     func switchWorkspace(_ id: UUID) {
         guard id != currentWorkspaceID, let next = workspaces.first(where: { $0.id == id }) else { return }
+        let from = workspaces.firstIndex { $0.id == currentWorkspaceID } ?? 0
+        let to = workspaces.firstIndex { $0.id == id } ?? 0
+        workspaceDirection = to >= from ? 1 : -1
+
         let keep = Set(next.tabs.map(\.bundleID))
-        for tab in tabs where !keep.contains(tab.bundleID) {
-            runningApp(tab.bundleID)?.hide()
-        }
+        let leaving = tabs.map(\.bundleID).filter { !keep.contains($0) }
         currentWorkspaceID = id
         currentID = nil
         save()
 
         if let target = next.tabs.first(where: { $0.bundleID == next.lastBundleID }) ?? next.tabs.first {
-            select(target)
+            select(target, alsoHide: leaving)
+        } else {
+            // Empty workspace: nothing to show, just put the old set away.
+            for id in leaving { runningApp(id)?.hide() }
         }
     }
 
@@ -201,15 +225,17 @@ final class WorkspaceManager: ObservableObject {
 
     /// The area apps are fitted into: the screen's visible frame (no menu bar / Dock)
     /// minus the sidebar when it is shown.
-    private var contentFrameAX: CGRect? {
+    private var contentFrameCocoa: NSRect? {
         guard let screen = panel?.screen ?? NSScreen.screens.first else { return nil }
         var frame = screen.visibleFrame
         if sidebarShown {
             frame.origin.x += Layout.sidebarWidth
             frame.size.width -= Layout.sidebarWidth
         }
-        return AX.toAX(frame)
+        return frame
     }
+
+    private var contentFrameAX: CGRect? { contentFrameCocoa.map(AX.toAX) }
 
     /// Fits the app's main window into the content area. Apps that are still launching or
     /// have no open window are retried for a few seconds; halfway through, a "reopen" is
@@ -224,9 +250,10 @@ final class WorkspaceManager: ObservableObject {
 
         if let w = AX.mainWindow(pid: app.processIdentifier) {
             // A full-screen window lives in its own Space; leave it alone.
-            if AX.isFullScreen(w) { return }
+            if AX.isFullScreen(w) { SwitchCurtain.shared.reveal(); return }
             AX.setFrame(w, frame)
             AX.raise(w)
+            if attempt >= 0 { SwitchCurtain.shared.reveal() }
             // A second pass catches apps that reposition themselves while un-hiding.
             if attempt >= 0 {
                 after(0.25) { [weak self] in self?.place(app, token: token, attempt: -1) }
@@ -234,7 +261,7 @@ final class WorkspaceManager: ObservableObject {
             return
         }
 
-        guard attempt >= 0, attempt < 40 else { return }
+        guard attempt >= 0, attempt < 40 else { SwitchCurtain.shared.reveal(); return }
         if attempt == 10 { reopen(app) }
         after(0.1) { [weak self] in self?.place(app, token: token, attempt: attempt + 1) }
     }
@@ -249,6 +276,7 @@ final class WorkspaceManager: ObservableObject {
     private func launch(_ tab: AppTab) {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: tab.bundleID) else {
             NSSound.beep()
+            SwitchCurtain.shared.reveal()
             return
         }
         let config = NSWorkspace.OpenConfiguration()

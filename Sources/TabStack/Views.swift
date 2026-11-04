@@ -3,6 +3,8 @@ import AppKit
 
 struct SidebarView: View {
     @ObservedObject var manager: WorkspaceManager
+    @Namespace private var selectionNS
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 6) {
@@ -12,15 +14,14 @@ struct SidebarView: View {
             Rectangle().fill(Color.primary.opacity(0.12)).frame(width: 36, height: 1)
 
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 6) {
-                    ForEach(Array(manager.tabs.enumerated()), id: \.element.id) { index, tab in
-                        TabButton(manager: manager, tab: tab, index: index)
-                    }
-                    AddMenu(manager: manager)
+                ZStack(alignment: .top) {
+                    tabColumn
+                        .id(manager.currentWorkspaceID)
+                        .transition(pageTransition)
                 }
-                .padding(.vertical, 4)
                 .frame(maxWidth: .infinity)
             }
+            .animation(reduceMotion ? .easeInOut(duration: 0.15) : Motion.page, value: manager.currentWorkspaceID)
 
             if !manager.trusted {
                 Button { AX.openSettings() } label: {
@@ -30,15 +31,42 @@ struct SidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .help("需要“辅助功能”权限，点击打开系统设置")
+                .transition(.opacity)
             }
 
             Spacer().frame(height: 6)
         }
+        .animation(.easeInOut(duration: 0.2), value: manager.trusted)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(VisualEffect())
         .overlay(alignment: .trailing) {
             Rectangle().fill(Color.primary.opacity(0.1)).frame(width: 1)
         }
+    }
+
+    private var tabColumn: some View {
+        VStack(spacing: 6) {
+            ForEach(Array(manager.tabs.enumerated()), id: \.element.id) { index, tab in
+                TabButton(manager: manager, tab: tab, index: index,
+                          selectionNS: selectionNS, reduceMotion: reduceMotion)
+                    .transition(reduceMotion ? .opacity : .scale(scale: 0.6).combined(with: .opacity))
+            }
+            AddMenu(manager: manager)
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity)
+        .animation(reduceMotion ? .easeInOut(duration: 0.12) : Motion.selection, value: manager.currentID)
+        .animation(Motion.selection, value: manager.tabs)
+    }
+
+    /// The incoming workspace slides in from the direction you moved (next: from below,
+    /// previous: from above); the outgoing one just fades back.
+    private var pageTransition: AnyTransition {
+        if reduceMotion { return .opacity }
+        let dy = CGFloat(manager.workspaceDirection) * 22
+        return .asymmetric(
+            insertion: .offset(y: dy).combined(with: .opacity),
+            removal: .scale(scale: 0.96).combined(with: .opacity))
     }
 }
 
@@ -59,21 +87,34 @@ struct WorkspaceMenu: View {
 
         Button { showMenu() } label: {
             VStack(spacing: 3) {
-                Text(String(current.name.prefix(1)).uppercased())
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundColor(.white)
-                    .frame(width: 34, height: 34)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(WorkspaceColor.color(at: index)))
-                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.white.opacity(hovering ? 0.6 : 0), lineWidth: 1.5))
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9).fill(WorkspaceColor.color(at: index))
+                    Text(String(current.name.prefix(1)).uppercased())
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(.white)
+                        .id(current.id)
+                        .transition(.asymmetric(
+                            insertion: .scale(scale: 0.5).combined(with: .opacity),
+                            removal: .scale(scale: 1.4).combined(with: .opacity)))
+                }
+                .frame(width: 34, height: 34)
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.white.opacity(hovering ? 0.6 : 0), lineWidth: 1.5))
+                .scaleEffect(hovering ? 1.06 : 1)
+
                 Text(current.name)
                     .font(.system(size: 9))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                     .frame(width: Layout.sidebarWidth - 8)
+                    .id(current.name)
+                    .transition(.opacity)
             }
             .contentShape(Rectangle())
+            .animation(Motion.page, value: current.id)
+            .animation(Motion.page, value: current.name)
+            .animation(Motion.press, value: hovering)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
         .onHover { hovering = $0 }
         .help("工作区：\(current.name)（点击切换或管理）")
     }
@@ -141,11 +182,16 @@ struct TabButton: View {
     @ObservedObject var manager: WorkspaceManager
     let tab: AppTab
     let index: Int
+    let selectionNS: Namespace.ID
+    let reduceMotion: Bool
     @State private var hovering = false
 
     var body: some View {
         let selected = manager.currentID == tab.bundleID
         let running = manager.runningIDs.contains(tab.bundleID)
+        let badge = manager.badge(for: tab)
+        // Scoped per workspace so the outgoing and incoming pages never share a highlight.
+        let matchID = "selection-\(manager.currentWorkspaceID)"
 
         Button { manager.select(tab) } label: {
             Image(nsImage: manager.icon(for: tab.bundleID))
@@ -153,14 +199,24 @@ struct TabButton: View {
                 .interpolation(.high)
                 .frame(width: 34, height: 34)
                 .opacity(running ? 1 : 0.45)
+                .saturation(running ? 1 : 0.3)
+                .scaleEffect(hovering && !reduceMotion ? 1.06 : 1)
                 .frame(width: 48, height: 46)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(selected ? Color.accentColor.opacity(0.28)
-                                       : (hovering ? Color.primary.opacity(0.08) : .clear))
-                )
+                .background {
+                    ZStack {
+                        if hovering && !selected {
+                            RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.08))
+                                .transition(.opacity)
+                        }
+                        if selected {
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color.accentColor.opacity(0.28))
+                                .matchedGeometryEffect(id: matchID, in: selectionNS)
+                        }
+                    }
+                }
                 .overlay(alignment: .topTrailing) {
-                    if let badge = manager.badge(for: tab) {
+                    if let badge {
                         Text(badge)
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(.white)
@@ -168,16 +224,23 @@ struct TabButton: View {
                             .padding(.vertical, 1)
                             .background(Capsule().fill(Color.red))
                             .offset(x: 3, y: -2)
+                            .transition(.scale(scale: 0.3, anchor: .center).combined(with: .opacity))
                     }
                 }
                 .overlay(alignment: .leading) {
                     if selected {
-                        Capsule().fill(Color.accentColor).frame(width: 3, height: 22).offset(x: -6)
+                        Capsule().fill(Color.accentColor)
+                            .frame(width: 3, height: 22)
+                            .offset(x: -6)
+                            .matchedGeometryEffect(id: matchID + "-bar", in: selectionNS)
                     }
                 }
                 .contentShape(Rectangle())
+                .animation(Motion.press, value: hovering)
+                .animation(Motion.press, value: badge)
+                .animation(.easeInOut(duration: 0.3), value: running)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
         .onHover { hovering = $0 }
         .help(index < 9 ? "\(tab.name)   ⌥⌘\(index + 1)" : tab.name)
         .contextMenu {
@@ -189,6 +252,16 @@ struct TabButton: View {
             }
             Button("从工作区移除") { manager.remove(tab) }
         }
+    }
+}
+
+/// Presses in slightly and springs back, like a physical key.
+struct PressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && !Motion.reduce ? 0.9 : 1)
+            .brightness(configuration.isPressed ? -0.05 : 0)
+            .animation(Motion.press, value: configuration.isPressed)
     }
 }
 

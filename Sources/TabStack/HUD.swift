@@ -78,7 +78,14 @@ private struct HUDView: View {
         .frame(minWidth: 180)
         .background(VisualEffectHUD())
         .clipShape(RoundedRectangle(cornerRadius: 18))
+        .scaleEffect(appeared || Motion.reduce ? 1 : 0.9)
+        .opacity(appeared ? 1 : 0)
+        .onAppear {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) { appeared = true }
+        }
     }
+
+    @State private var appeared = false
 }
 
 private struct VisualEffectHUD: NSViewRepresentable {

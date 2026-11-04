@@ -126,6 +126,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(ClosureMenuItem("新建工作区…") { [weak self] in self?.manager.newWorkspace() })
         menu.addItem(.separator())
+        let motion = ClosureMenuItem("切换动画") { Motion.curtainEnabled.toggle() }
+        motion.state = Motion.curtainEnabled ? .on : .off
+        menu.addItem(motion)
         menu.addItem(ClosureMenuItem("辅助功能设置…") { AX.openSettings() })
         menu.addItem(ClosureMenuItem("退出 TabStack") { NSApp.terminate(nil) })
     }
@@ -156,18 +159,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func toggleSidebar() {
         userHidden.toggle()
         manager.sidebarShown = !userHidden
-        updateVisibility()
+        updateVisibility(animated: true)
         manager.layoutChanged()
     }
 
-    private func updateVisibility() {
+    private func updateVisibility(animated: Bool = false) {
         if let fs = AX.frontmostIsFullScreen() { fullScreenInFront = fs }
-        let show = !userHidden && !fullScreenInFront
-        if show && !panel.isVisible {
-            dock()
-            panel.orderFrontRegardless()
-        } else if !show && panel.isVisible {
-            panel.orderOut(nil)
+        setSidebar(visible: !userHidden && !fullScreenInFront, animated: animated)
+    }
+
+    /// The visibility the sidebar is heading to (it may still be mid-slide).
+    private var sidebarVisible = true
+
+    /// Slides the sidebar in from / out to the left screen edge. Full-screen changes are
+    /// not animated: macOS is already animating its Space transition then.
+    private func setSidebar(visible: Bool, animated: Bool) {
+        guard visible != sidebarVisible else { return }
+        sidebarVisible = visible
+        guard let screen = NSScreen.screens.first else { return }
+        let vf = screen.visibleFrame
+        let docked = NSRect(x: vf.minX, y: vf.minY, width: Layout.sidebarWidth, height: vf.height)
+        // Reduce Motion: fade in place instead of sliding.
+        let away = Motion.reduce ? docked : docked.offsetBy(dx: -Layout.sidebarWidth, dy: 0)
+
+        guard animated else {
+            if visible { panel.setFrame(docked, display: true); panel.alphaValue = 1; panel.orderFrontRegardless() }
+            else { panel.orderOut(nil) }
+            return
+        }
+
+        if visible {
+            if !panel.isVisible {
+                panel.setFrame(away, display: true)
+                panel.alphaValue = 0
+                panel.orderFrontRegardless()
+            }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = Motion.sidebarIn
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1) // soft ease-out
+                panel.animator().setFrame(docked, display: true)
+                panel.animator().alphaValue = 1
+            }
+        } else {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = Motion.sidebarOut
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                panel.animator().setFrame(away, display: true)
+                panel.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                guard let self, !self.sidebarVisible else { return }
+                self.panel.orderOut(nil)
+                self.panel.setFrame(docked, display: false)
+                self.panel.alphaValue = 1
+            })
         }
     }
 }
