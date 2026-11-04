@@ -173,6 +173,7 @@ final class ControlCommands {
         var d: [String: Any] = [
             "id": ws.id.uuidString, "name": ws.name,
             "current": ws.id == m.currentWorkspaceID,
+            "onOtherDisplay": m.otherDisplay(showing: ws.id) != nil,
             "shownInSidebar": m.activeIDs.contains(ws.id),
             "pinned": ws.pinned == true,
             "tabs": ws.tabs.map(describe),

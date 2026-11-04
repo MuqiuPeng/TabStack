@@ -219,6 +219,8 @@ private struct SearchView: View {
                 Spacer()
                 if ws.id == manager.currentWorkspaceID {
                     tag("当前")
+                } else if manager.otherDisplay(showing: ws.id) != nil {
+                    tag("另一屏")
                 } else if !shown {
                     tag("已收起")
                 }

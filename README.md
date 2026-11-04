@@ -103,6 +103,13 @@ Other behaviour:
   Recommendation is frecency-based — one point per switch and one per ten
   minutes of use, halved every three days. The others are collapsed, never
   deleted; reach them with `⌃⌥F` or **Other workspaces** in the workspace menu.
+- **Several displays**: each display gets its own sidebar and shows its own
+  workspace; two displays never show the same one. Hotkeys and menus act on the
+  display you last clicked or worked in. Switching to a workspace another
+  display is showing swaps the two: each display's windows move to the other.
+  Unplugging a display hides its workspace; plugging it back brings it back.
+  Desktops (Spaces) still share one workspace — macOS does not let apps move
+  other apps' windows between Spaces.
 
 ## Let an AI set up your workspaces (MCP)
 
@@ -136,7 +143,7 @@ GitHub repo using my Work profile."
 
 ## Known limitations
 
-- The sidebar docks to the main display only.
+- All desktops (Spaces) of a display share its workspace.
 - Other windows of the same app cannot be hidden individually, so they stack
   behind the current one when you switch.
 - Window identification relies on the private API `_AXUIElementGetWindow`.

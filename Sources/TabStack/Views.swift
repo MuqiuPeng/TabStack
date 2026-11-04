@@ -11,6 +11,11 @@ struct SidebarView: View {
     @State private var draggedMid: CGFloat = 0
     @State private var draggedHeight: CGFloat = 46
     @State private var rowFrames: [UUID: CGRect] = [:]
+    @Environment(\.sidebarDisplay) private var display
+
+    /// This display's workspace (each display's sidebar shows its own).
+    private var workspaceID: UUID? { manager.workspaceID(on: display) }
+    private var tabs: [AppTab] { manager.workspace(on: display)?.tabs ?? [] }
 
     /// Drag a tab up or down to reorder; a plain click still selects it.
     private func reorderGesture(_ tab: AppTab) -> some Gesture {
@@ -25,16 +30,17 @@ struct SidebarView: View {
                 }
                 dragY = v.translation.height
                 let y = dragStartMid + dragY
-                guard let i = manager.tabs.firstIndex(of: tab) else { return }
+                let tabs = self.tabs
+                guard let i = tabs.firstIndex(of: tab) else { return }
                 // Swap with a neighbor once the pointer crosses that neighbor's middle.
                 var j = i
-                while j + 1 < manager.tabs.count, let f = rowFrames[manager.tabs[j + 1].id], y > f.midY { j += 1 }
+                while j + 1 < tabs.count, let f = rowFrames[tabs[j + 1].id], y > f.midY { j += 1 }
                 if j == i {
-                    while j - 1 >= 0, let f = rowFrames[manager.tabs[j - 1].id], y < f.midY { j -= 1 }
+                    while j - 1 >= 0, let f = rowFrames[tabs[j - 1].id], y < f.midY { j -= 1 }
                 }
-                guard j != i, let f = rowFrames[manager.tabs[j].id] else { return }
+                guard j != i, let f = rowFrames[tabs[j].id] else { return }
                 draggedMid = j > i ? f.maxY - draggedHeight / 2 : f.minY + draggedHeight / 2
-                withAnimation(Motion.selection) { manager.moveTab(tab.id, onto: manager.tabs[j].id) }
+                withAnimation(Motion.selection) { manager.moveTab(tab.id, onto: tabs[j].id) }
             }
             .onEnded { _ in
                 withAnimation(Motion.selection) { dragging = nil; dragY = 0 }
@@ -53,12 +59,12 @@ struct SidebarView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 ZStack(alignment: .top) {
                     tabColumn
-                        .id(manager.currentWorkspaceID)
+                        .id(workspaceID)
                         .transition(pageTransition)
                 }
                 .frame(maxWidth: .infinity)
             }
-            .animation(reduceMotion ? .easeInOut(duration: 0.15) : Motion.page, value: manager.currentWorkspaceID)
+            .animation(reduceMotion ? .easeInOut(duration: 0.15) : Motion.page, value: workspaceID)
 
             if !manager.trusted {
                 Button { AX.openSettings() } label: {
@@ -85,7 +91,7 @@ struct SidebarView: View {
 
     private var tabColumn: some View {
         VStack(spacing: 6) {
-            ForEach(Array(manager.tabs.enumerated()), id: \.element.id) { index, tab in
+            ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
                 let isDragged = dragging == tab.id
                 TabButton(manager: manager, tab: tab, index: index,
                           selectionNS: selectionNS, reduceMotion: reduceMotion)
@@ -105,10 +111,10 @@ struct SidebarView: View {
         .padding(.vertical, 4)
         .coordinateSpace(name: "tabColumn")
         .onPreferenceChange(RowFrameKey.self) { rowFrames = $0 }
-        .onChange(of: manager.currentWorkspaceID) { _ in dragging = nil }
+        .onChange(of: workspaceID) { _ in dragging = nil }
         .frame(maxWidth: .infinity)
-        .animation(reduceMotion ? .easeInOut(duration: 0.12) : Motion.selection, value: manager.currentID)
-        .animation(Motion.selection, value: manager.tabs)
+        .animation(reduceMotion ? .easeInOut(duration: 0.12) : Motion.selection, value: manager.selectedTabID(on: display))
+        .animation(Motion.selection, value: tabs)
     }
 
     /// The incoming workspace slides in from the direction you moved (next: from below,
@@ -140,9 +146,10 @@ enum WorkspaceColor {
 struct WorkspaceMenu: View {
     @ObservedObject var manager: WorkspaceManager
     @State private var hovering = false
+    @Environment(\.sidebarDisplay) private var display
 
     var body: some View {
-        let current = manager.currentWorkspace
+        let current = manager.workspace(on: display) ?? manager.currentWorkspace
         let index = manager.workspaces.firstIndex(of: current) ?? 0
 
         Button { manager.onExpandSidebar?() } label: {
@@ -236,7 +243,8 @@ enum WorkspaceMenuItems {
     static func add(to menu: NSMenu, manager m: WorkspaceManager) {
         for (i, ws) in m.activeWorkspaces.enumerated() {
             let item = ClosureMenuItem(ws.name) { m.switchWorkspace(ws.id) }
-            item.state = ws.id == m.currentWorkspaceID ? .on : .off
+            item.state = ws.id == m.currentWorkspaceID ? .on : m.otherDisplay(showing: ws.id) != nil ? .mixed : .off
+            if m.otherDisplay(showing: ws.id) != nil { item.toolTip = "显示在另一块屏幕上，选择后两块屏幕交换工作区" }
             if i < 9 {
                 item.keyEquivalent = "\(i + 1)"
                 item.keyEquivalentModifierMask = [.control, .option]
@@ -287,15 +295,16 @@ struct TabButton: View {
     let selectionNS: Namespace.ID
     let reduceMotion: Bool
     @State private var hovering = false
+    @Environment(\.sidebarDisplay) private var display
 
     var body: some View {
-        let selected = manager.currentID == tab.id
+        let selected = manager.selectedTabID(on: display) == tab.id
         let available = manager.isAvailable(tab)
         let running = manager.runningIDs.contains(tab.bundleID)
         let badge = manager.badge(for: tab)
         let label = manager.label(for: tab)
         // Scoped per workspace so the outgoing and incoming pages never share a highlight.
-        let matchID = "selection-\(manager.currentWorkspaceID)"
+        let matchID = "selection-\(manager.workspaceID(on: display)?.uuidString ?? "")"
 
         Button { manager.select(tab) } label: {
             VStack(spacing: 2) {
@@ -366,7 +375,8 @@ struct TabButton: View {
             }
             Divider()
             Button("上移") { manager.move(tab, by: -1) }.disabled(index == 0)
-            Button("下移") { manager.move(tab, by: 1) }.disabled(index == manager.tabs.count - 1)
+            Button("下移") { manager.move(tab, by: 1) }
+                .disabled(index == (manager.workspace(on: display)?.tabs.count ?? 0) - 1)
             Divider()
             if running {
                 Button("退出 \(tab.name)（所有窗口）") { manager.quit(tab) }
@@ -399,6 +409,7 @@ struct PressStyle: ButtonStyle {
 
 struct AddMenu: View {
     @ObservedObject var manager: WorkspaceManager
+    @Environment(\.sidebarDisplay) private var display
 
     var body: some View {
         Button { showMenu() } label: {
@@ -409,11 +420,11 @@ struct AddMenu: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(PressStyle())
-        .help("添加窗口到“\(manager.currentWorkspace.name)”")
+        .help("添加窗口到“\((manager.workspace(on: display) ?? manager.currentWorkspace).name)”")
     }
 
     private func showMenu() {
-        WindowPicker.popUp(manager: manager, workspaceID: manager.currentWorkspaceID)
+        WindowPicker.popUp(manager: manager, workspaceID: manager.workspaceID(on: display) ?? manager.currentWorkspaceID)
     }
 }
 
@@ -520,10 +531,11 @@ struct VisualEffect: NSViewRepresentable {
 /// workspaces from the keyboard — a wider list of every workspace.
 struct SidebarRoot: View {
     @ObservedObject var manager: WorkspaceManager
+    @Environment(\.sidebarDisplay) private var display
 
     var body: some View {
         ZStack(alignment: .leading) {
-            if manager.expanded {
+            if manager.expanded && display == manager.focusedDisplay {
                 WorkspaceColumns(manager: manager)
                     .transition(.opacity)
             } else {
@@ -535,7 +547,7 @@ struct SidebarRoot: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(VisualEffect())
         .onHover { manager.hoveringSidebar = $0 }
-        .animation(.easeInOut(duration: Motion.reduce ? 0.1 : 0.18), value: manager.expanded)
+        .animation(.easeInOut(duration: Motion.reduce ? 0.1 : 0.18), value: manager.expanded && display == manager.focusedDisplay)
     }
 }
 
@@ -579,6 +591,8 @@ private struct WorkspaceColumn: View {
     let ns: Namespace.ID
     @State private var hovering = false
 
+    private var onOtherDisplay: Bool { manager.otherDisplay(showing: workspace.id) != nil }
+
     var body: some View {
         VStack(spacing: 6) {
             VStack(spacing: 3) {
@@ -593,9 +607,12 @@ private struct WorkspaceColumn: View {
                     .foregroundColor(current ? .primary : .secondary)
                     .lineLimit(1)
                     .frame(width: Layout.sidebarWidth - 8)
-                Text(index < 9 ? "⌃⌥\(index + 1)" : " ")
-                    .font(.system(size: 8, design: .rounded))
-                    .foregroundColor(.secondary)
+                HStack(spacing: 2) {
+                    if onOtherDisplay { Image(systemName: "display").font(.system(size: 7)) }
+                    Text(index < 9 ? "⌃⌥\(index + 1)" : " ")
+                }
+                .font(.system(size: 8, design: .rounded))
+                .foregroundColor(.secondary)
             }
             .padding(.top, 6)
             .contentShape(Rectangle())
@@ -603,7 +620,7 @@ private struct WorkspaceColumn: View {
             .onTapGesture {
                 if current { manager.onExpandSidebar?() } else { manager.switchWorkspace(workspace.id) }
             }
-            .help(current ? "收起" : "切换到“\(workspace.name)”")
+            .help(current ? "收起" : onOtherDisplay ? "在另一块屏幕上，点击后两块屏幕交换" : "切换到“\(workspace.name)”")
 
             Rectangle().fill(Color.primary.opacity(0.12)).frame(width: 28, height: 1)
 

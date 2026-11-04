@@ -6,10 +6,21 @@ import SwiftUI
 final class SidebarPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+    /// Runs before the click reaches SwiftUI, so the display is focused when the
+    /// button's action runs.
+    var onMouseDown: (() -> Void)?
+
+    override func sendEvent(_ event: NSEvent) {
+        if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) { onMouseDown?() }
+        super.sendEvent(event)
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private var panel: SidebarPanel!
+    /// One sidebar per display that has a workspace.
+    private var panels: [DisplayKey: SidebarPanel] = [:]
+    /// The focused display's sidebar: the one that expands into the workspace list.
+    private var panel: SidebarPanel? { panels[manager.focusedDisplay] }
     private var manager: WorkspaceManager!
     /// Menu bar icon: the always-available way back when the sidebar is hidden.
     private var statusItem: NSStatusItem!
@@ -20,20 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         manager = WorkspaceManager()
 
-        panel = SidebarPanel(
-            contentRect: .zero,
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered, defer: false)
-        panel.isFloatingPanel = true
-        panel.level = .floating
-        panel.hidesOnDeactivate = false
-        // No .fullScreenAuxiliary: the sidebar belongs to desktops, not full-screen Spaces.
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.contentView = NSHostingView(rootView: SidebarRoot(manager: manager))
-        manager.panel = panel
+        manager.onFocusedDisplayChange = { [weak self] in self?.collapseList(animated: false) }
         manager.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         manager.onOpenSettings = { [weak self] id in self?.settings.show(workspace: id) }
         manager.onSearch = { [weak self] in self?.search.show() }
@@ -43,7 +41,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         buildMainMenu()
         dock()
-        panel.orderFrontRegardless()
         setUpStatusItem()
 
         NotificationCenter.default.addObserver(
@@ -185,11 +182,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         control.stop()
     }
 
-    /// Pins the panel to the left edge of the primary screen's visible area.
+    private func makePanel(for display: DisplayKey) -> SidebarPanel {
+        let p = SidebarPanel(
+            contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        p.isFloatingPanel = true
+        p.level = .floating
+        p.hidesOnDeactivate = false
+        // No .fullScreenAuxiliary: the sidebar belongs to desktops, not full-screen Spaces.
+        p.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
+        p.contentView = NSHostingView(rootView: SidebarRoot(manager: manager).environment(\.sidebarDisplay, display))
+        p.onMouseDown = { [weak self] in self?.manager.focusDisplay(display) }
+        return p
+    }
+
+    /// The sidebar's place on a display: the left edge of its visible area.
+    private func dockedFrame(_ display: DisplayKey) -> NSRect? {
+        guard let vf = Displays.screen(display)?.visibleFrame else { return nil }
+        return NSRect(x: vf.minX, y: vf.minY, width: Layout.sidebarWidth, height: vf.height)
+    }
+
+    /// One sidebar on the left edge of every display that has a workspace.
     private func dock() {
-        guard let screen = NSScreen.screens.first else { return }
-        let vf = screen.visibleFrame
-        panel.setFrame(NSRect(x: vf.minX, y: vf.minY, width: Layout.sidebarWidth, height: vf.height), display: true)
+        manager.assignDisplays()
+        let wanted = Set(Displays.keys.filter { manager.workspaceID(on: $0) != nil })
+        for (d, p) in panels where !wanted.contains(d) {
+            p.orderOut(nil)
+            panels[d] = nil
+        }
+        manager.expanded = false
+        for d in wanted {
+            let p = panels[d] ?? makePanel(for: d)
+            panels[d] = p
+            if let frame = dockedFrame(d) { p.setFrame(frame, display: true) }
+            if sidebarVisible { p.orderFrontRegardless() }
+        }
     }
 
     // MARK: Expanded workspace list
@@ -200,11 +231,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// where you are among all workspaces. Falls back to the centered HUD when the sidebar
     /// is hidden.
     private func flashWorkspaceList() {
-        guard sidebarVisible, panel.isVisible else { showWorkspaceHUD(); return }
+        guard sidebarVisible, let panel, panel.isVisible else { showWorkspaceHUD(); return }
         if !manager.expanded {
             manager.expanded = true
             let maxWidth = (panel.screen ?? NSScreen.screens.first)?.visibleFrame.width ?? 1200
-            resizePanel(to: Layout.expandedWidth(columns: manager.activeWorkspaces.count, maxWidth: maxWidth * 0.9))
+            resizePanel(panel, to: Layout.expandedWidth(columns: manager.activeWorkspaces.count, maxWidth: maxWidth * 0.9))
         }
         scheduleCollapse(after: 1.4)
     }
@@ -224,12 +255,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func collapseList(animated: Bool) {
         collapseWork?.cancel()
-        guard manager.expanded else { return }
         manager.expanded = false
-        resizePanel(to: Layout.sidebarWidth, animated: animated)
+        for p in panels.values where p.frame.width != Layout.sidebarWidth {
+            resizePanel(p, to: Layout.sidebarWidth, animated: animated)
+        }
     }
 
-    private func resizePanel(to width: CGFloat, animated: Bool = true) {
+    private func resizePanel(_ panel: NSPanel, to width: CGFloat, animated: Bool = true) {
         var frame = panel.frame
         frame.size.width = width
         guard animated, !Motion.reduce else { panel.setFrame(frame, display: true); return }
@@ -273,9 +305,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard visible != sidebarVisible else { return }
         sidebarVisible = visible
         if !visible { collapseList(animated: false) }
-        guard let screen = NSScreen.screens.first else { return }
-        let vf = screen.visibleFrame
-        let docked = NSRect(x: vf.minX, y: vf.minY, width: Layout.sidebarWidth, height: vf.height)
+        for (d, panel) in panels {
+            guard let docked = dockedFrame(d) else { continue }
+            slide(panel, docked: docked, visible: visible, animated: animated)
+        }
+    }
+
+    private func slide(_ panel: NSPanel, docked: NSRect, visible: Bool, animated: Bool) {
         // Reduce Motion: fade in place instead of sliding.
         let away = Motion.reduce ? docked : docked.offsetBy(dx: -Layout.sidebarWidth, dy: 0)
 
@@ -305,9 +341,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 panel.animator().alphaValue = 0
             }, completionHandler: { [weak self] in
                 guard let self, !self.sidebarVisible else { return }
-                self.panel.orderOut(nil)
-                self.panel.setFrame(docked, display: false)
-                self.panel.alphaValue = 1
+                panel.orderOut(nil)
+                panel.setFrame(docked, display: false)
+                panel.alphaValue = 1
             })
         }
     }

@@ -64,7 +64,7 @@ let tools: [[String: Any]] = [
      "annotations": ["destructiveHint": true],
      "inputSchema": schema(["workspace": wsRef], required: ["workspace"])],
     ["name": "switch_workspace",
-     "description": "Switch to a workspace (optionally to one of its tabs), showing its windows.",
+     "description": "Switch to a workspace (optionally to one of its tabs), showing its windows. With several displays each shows its own workspace; switching to one another display shows makes the two displays swap.",
      "inputSchema": schema(["workspace": wsRef, "tab": tabRef], required: ["workspace"])],
     ["name": "open_window",
      "description": "Open a NEW window and add it as a tab of a workspace, then switch there. Examples: {app:\"vscode\", path:\"~/projects/foo\"}; {app:\"terminal\", path:\"~/projects/foo\"} (new Terminal window in that folder); {app:\"finder\", path:\"~/projects/foo\"}; {app:\"chrome\", urls:[\"http://localhost:3000\", \"https://github.com/me/foo\"], profile:\"Work\"}. Without path/urls it opens a blank window (⌘N). If VS Code already has that folder open, that window is added instead.",

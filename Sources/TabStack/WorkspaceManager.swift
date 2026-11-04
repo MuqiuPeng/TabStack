@@ -151,9 +151,7 @@ final class WorkspaceManager: ObservableObject {
     @Published private(set) var badges: [String: String] = [:]
     @Published private(set) var trusted = AX.isTrusted
 
-    /// The docked sidebar panel.
-    weak var panel: NSPanel?
-    /// Set by the app delegate, which owns the panel.
+    /// Set by the app delegate, which owns the panels.
     var onToggleSidebar: (() -> Void)?
     /// Opens the settings window, optionally on a workspace. Set by the app delegate.
     var onOpenSettings: ((UUID?) -> Void)?
@@ -181,6 +179,8 @@ final class WorkspaceManager: ObservableObject {
     private enum Keys {
         static let workspaces = "workspaces"
         static let current = "currentWorkspace"
+        static let displays = "displays"
+        static let focusedDisplay = "focusedDisplay"
         static let legacyTabs = "tabs"
     }
 
@@ -212,6 +212,7 @@ final class WorkspaceManager: ObservableObject {
     func recomputeActive() {
         let now = Date().timeIntervalSince1970
         var chosen: [UUID] = [currentWorkspaceID]
+        for ws in workspaces where otherDisplay(showing: ws.id) != nil && !chosen.contains(ws.id) { chosen.append(ws.id) }
         for ws in workspaces where ws.pinned == true && !chosen.contains(ws.id) { chosen.append(ws.id) }
         let ranked = workspaces.enumerated()
             .filter { !chosen.contains($0.element.id) }
@@ -352,6 +353,7 @@ final class WorkspaceManager: ObservableObject {
         // Other apps are hidden. Other tabs of the *same* app can't be hidden one by one;
         // they share the content frame, so the raised window simply covers them.
         let others = Set(tabs.map(\.bundleID) + alsoHide).subtracting([tab.bundleID])
+            .subtracting(appsOnOtherDisplays)
         for id in others { runningApp(id)?.hide() }
     }
 
@@ -397,7 +399,12 @@ final class WorkspaceManager: ObservableObject {
         let to = workspaces.firstIndex { $0.id == id } ?? 0
         workspaceDirection = to >= from ? 1 : -1
 
-        let keep = Set(next.tabs.map(\.bundleID))
+        // Shown on another display already: the two displays trade workspaces, windows and all.
+        let swapDisplay = otherDisplay(showing: id)
+        let leftID = currentWorkspaceID
+        if let d = swapDisplay { otherDisplays[d] = DisplayState(workspace: leftID, tab: currentID) }
+
+        let keep = Set(next.tabs.map(\.bundleID)).union(appsOnOtherDisplays)
         let leaving = Array(Set(tabs.map(\.bundleID)).subtracting(keep))
         currentWorkspaceID = id
         currentID = nil
@@ -405,8 +412,13 @@ final class WorkspaceManager: ObservableObject {
         recomputeActive()
         save()
 
-        if let target = next.tabs.first(where: { $0.id == tabID })
-            ?? next.tabs.first(where: { $0.id == next.lastTabID }) ?? next.tabs.first {
+        let target = next.tabs.first(where: { $0.id == tabID })
+            ?? next.tabs.first(where: { $0.id == next.lastTabID }) ?? next.tabs.first
+        if let d = swapDisplay {
+            gather(leftID, onto: d, raise: otherDisplays[d]?.tab)
+            gather(id, onto: focusedDisplay, except: target?.id)
+        }
+        if let target {
             select(target, alsoHide: leaving)
             if UserDefaults.standard.object(forKey: "restoreOnSwitch") as? Bool ?? true {
                 after(0.6) { [weak self] in self?.restoreMissingWindows(in: id, except: target.id) }
@@ -439,9 +451,9 @@ final class WorkspaceManager: ObservableObject {
               Dialogs.confirm(title: "删除工作区“\(currentWorkspace.name)”？", message: "只删除这组标签，不会关闭其中的窗口或应用。")
         else { return }
         let removed = currentWorkspaceID
-        let fallback = workspaces.first { $0.id != removed }!.id
-        switchWorkspace(fallback)
+        switchWorkspace(fallbackWorkspace(for: removed))
         workspaces.removeAll { $0.id == removed }
+        assignDisplays()
         save()
         recomputeActive()
         syncWatcher()
@@ -701,14 +713,17 @@ final class WorkspaceManager: ObservableObject {
 
     /// Re-fits the current tab after the screen layout changed or the sidebar was toggled.
     func layoutChanged() {
+        for (d, state) in otherDisplays { gather(state.workspace, onto: d, raise: state.tab) }
         guard let tab = currentTab, let app = runningApp(tab.bundleID), !app.isHidden else { return }
         place(tab)
     }
 
     /// The area windows are fitted into: the screen's visible frame (no menu bar / Dock)
     /// minus the sidebar when it is shown.
-    private var contentFrameCocoa: NSRect? {
-        guard let screen = panel?.screen ?? NSScreen.screens.first else { return nil }
+    private var contentFrameCocoa: NSRect? { contentFrame(on: focusedDisplay) }
+
+    func contentFrame(on display: DisplayKey) -> NSRect? {
+        guard let screen = Displays.screen(display) ?? NSScreen.screens.first else { return nil }
         var frame = screen.visibleFrame
         if sidebarShown {
             frame.origin.x += Layout.sidebarWidth
@@ -747,6 +762,9 @@ final class WorkspaceManager: ObservableObject {
             if AX.isFullScreen(w) { SwitchCurtain.shared.reveal(); return }
             app.unhide()
             AX.setFrame(w, frame)
+            // Activating an app brings all its windows forward, on every display; put
+            // the other displays' own windows back on top first, then this one.
+            raiseOtherDisplays()
             AX.raise(w)
             if attempt >= 0 {
                 SwitchCurtain.shared.reveal()
@@ -951,10 +969,9 @@ final class WorkspaceManager: ObservableObject {
     /// Deletes without asking (the control socket); leaves it first if it is current.
     func removeWorkspace(_ id: UUID) {
         guard workspaces.count > 1 else { return }
-        if id == currentWorkspaceID, let other = workspaces.first(where: { $0.id != id }) {
-            switchWorkspace(other.id)
-        }
+        if id == currentWorkspaceID { switchWorkspace(fallbackWorkspace(for: id)) }
         workspaces.removeAll { $0.id == id }
+        assignDisplays()
         save()
         recomputeActive()
         syncWatcher()
@@ -965,10 +982,9 @@ final class WorkspaceManager: ObservableObject {
         guard workspaces.count > 1, let ws = workspaces.first(where: { $0.id == id }),
               Dialogs.confirm(title: "删除工作区“\(ws.name)”？", message: "只删除这组标签，不会关闭其中的窗口或应用。")
         else { return }
-        if id == currentWorkspaceID, let other = workspaces.first(where: { $0.id != id }) {
-            switchWorkspace(other.id)
-        }
+        if id == currentWorkspaceID { switchWorkspace(fallbackWorkspace(for: id)) }
         workspaces.removeAll { $0.id == id }
+        assignDisplays()
         save()
         recomputeActive()
         syncWatcher()
@@ -1167,9 +1183,11 @@ final class WorkspaceManager: ObservableObject {
         guard AX.isTrusted,
               let app = NSRunningApplication(processIdentifier: pid), !app.isHidden,
               let bundleID = app.bundleIdentifier,
-              tabs.contains(where: { $0.bundleID == bundleID }),
               let w = AX.focusedWindow(pid: pid), let wid = AX.windowID(w)
         else { return }
+        // Working in a window on another display moves the focus (hotkeys, menus) there.
+        if let d = display(ofWindow: wid, w) { focusDisplay(d) }
+        guard tabs.contains(where: { $0.bundleID == bundleID }) else { return }
         refreshLiveWindows()
 
         if let tab = tabs.first(where: { $0.windowID == wid }) {
@@ -1270,8 +1288,17 @@ final class WorkspaceManager: ObservableObject {
         for i in workspaces.indices where workspaces[i].color == nil {
             workspaces[i].color = i % WorkspaceColor.palette.count
         }
-        save() // persists ids given to tabs migrated from the app-level format
-        recomputeActive()
+        if let data = defaults.data(forKey: Keys.displays),
+           let saved = try? JSONDecoder().decode([DisplayKey: DisplayState].self, from: data) {
+            rememberedDisplays = saved
+        }
+        let connected = Displays.keys
+        if let f = defaults.string(forKey: Keys.focusedDisplay), connected.contains(f) {
+            focusedDisplay = f
+        } else {
+            focusedDisplay = Displays.primaryKey
+        }
+        assignDisplays() // also saves; persists ids given to tabs migrated from the app-level format
     }
 
     private func save() {
@@ -1279,6 +1306,169 @@ final class WorkspaceManager: ObservableObject {
             UserDefaults.standard.set(data, forKey: Keys.workspaces)
         }
         UserDefaults.standard.set(currentWorkspaceID.uuidString, forKey: Keys.current)
+        var displays = rememberedDisplays
+        for (k, state) in otherDisplays { displays[k] = state }
+        displays[focusedDisplay] = DisplayState(workspace: currentWorkspaceID, tab: currentID)
+        if let data = try? JSONEncoder().encode(displays) {
+            UserDefaults.standard.set(data, forKey: Keys.displays)
+        }
+        UserDefaults.standard.set(focusedDisplay, forKey: Keys.focusedDisplay)
+    }
+
+    // MARK: Displays
+
+    /// Each display shows its own workspace in its own sidebar. Hotkeys, menus and new
+    /// windows act on the focused display (the one last clicked or worked in), whose
+    /// workspace and tab are `currentWorkspaceID` / `currentID`.
+    @Published private(set) var focusedDisplay: DisplayKey = Displays.primaryKey
+    /// Workspace and selected tab of every other connected display.
+    @Published private(set) var otherDisplays: [DisplayKey: DisplayState] = [:]
+    /// What displays seen before showed, so a reconnected display gets its workspace back.
+    private var rememberedDisplays: [DisplayKey: DisplayState] = [:]
+    /// Called when the focused display changes. Set by the app delegate.
+    var onFocusedDisplayChange: (() -> Void)?
+
+    func workspaceID(on display: DisplayKey) -> UUID? {
+        display == focusedDisplay ? currentWorkspaceID : otherDisplays[display]?.workspace
+    }
+
+    func selectedTabID(on display: DisplayKey) -> UUID? {
+        display == focusedDisplay ? currentID : otherDisplays[display]?.tab
+    }
+
+    func workspace(on display: DisplayKey) -> Workspace? {
+        workspaceID(on: display).flatMap { id in workspaces.first { $0.id == id } }
+    }
+
+    /// The other display showing this workspace, if any.
+    func otherDisplay(showing id: UUID) -> DisplayKey? {
+        otherDisplays.first { $0.value.workspace == id }?.key
+    }
+
+    /// Apps with a tab in a workspace on another display: switching here must not hide them.
+    private var appsOnOtherDisplays: Set<String> {
+        let ids = Set(otherDisplays.values.map(\.workspace))
+        return Set(workspaces.filter { ids.contains($0.id) }.flatMap { $0.tabs.map(\.bundleID) })
+    }
+
+    /// The other display a focused window belongs to: by its tab, else by where it is.
+    private func display(ofWindow wid: CGWindowID, _ w: AXUIElement) -> DisplayKey? {
+        guard !otherDisplays.isEmpty else { return nil }
+        for (d, state) in otherDisplays {
+            if workspaces.first(where: { $0.id == state.workspace })?.tabs.contains(where: { $0.windowID == wid }) == true {
+                return d
+            }
+        }
+        if tabs.contains(where: { $0.windowID == wid }) { return nil }
+        guard let p = AX.position(w), let s = AX.size(w),
+              let d = Displays.key(containingAX: CGRect(origin: p, size: s)), otherDisplays[d] != nil
+        else { return nil }
+        return d
+    }
+
+    func focusDisplay(_ display: DisplayKey) {
+        guard display != focusedDisplay, let state = otherDisplays[display] else { return }
+        otherDisplays[focusedDisplay] = DisplayState(workspace: currentWorkspaceID, tab: currentID)
+        otherDisplays[display] = nil
+        focusedDisplay = display
+        currentWorkspaceID = state.workspace
+        currentID = state.tab
+        save()
+        onFocusedDisplayChange?()
+    }
+
+    /// Gives every connected display a workspace of its own (no two show the same one):
+    /// the one it showed before if still free, else the most used free one. Call after
+    /// displays come or go and after workspaces are deleted.
+    func assignDisplays() {
+        for (k, state) in otherDisplays { rememberedDisplays[k] = state }
+        rememberedDisplays[focusedDisplay] = DisplayState(workspace: currentWorkspaceID, tab: currentID)
+
+        let connected = Displays.keys
+        if !connected.contains(focusedDisplay) {
+            // The focused display went away (its windows land on the others); keep working
+            // in its workspace on the primary display.
+            focusedDisplay = Displays.primaryKey
+            onFocusedDisplayChange?()
+        }
+        let exists = Set(workspaces.map(\.id))
+        if !exists.contains(currentWorkspaceID) {
+            currentWorkspaceID = workspaces[0].id
+            currentID = currentWorkspace.lastTabID
+        }
+
+        var used: Set<UUID> = [currentWorkspaceID]
+        var next: [DisplayKey: DisplayState] = [:]
+        for d in connected where d != focusedDisplay {
+            if let state = otherDisplays[d] ?? rememberedDisplays[d],
+               exists.contains(state.workspace), !used.contains(state.workspace) {
+                next[d] = state
+            } else if let ws = rankedWorkspaces(excluding: used).first {
+                next[d] = DisplayState(workspace: ws.id, tab: ws.lastTabID)
+            } else {
+                continue // fewer workspaces than displays: this one gets no sidebar
+            }
+            used.insert(next[d]!.workspace)
+        }
+        // A display that went away hands its windows to the others: put them away.
+        let vanished = Set(otherDisplays.values.map(\.workspace)).subtracting(next.values.map(\.workspace))
+        if next != otherDisplays { otherDisplays = next }
+        if !vanished.isEmpty {
+            let keep = Set(tabs.map(\.bundleID)).union(appsOnOtherDisplays)
+            let apps = Set(workspaces.filter { vanished.contains($0.id) }.flatMap { $0.tabs.map(\.bundleID) })
+            for id in apps.subtracting(keep) { runningApp(id)?.hide() }
+        }
+        recomputeActive()
+        save()
+    }
+
+    /// Workspaces not in `used`, most used first.
+    private func rankedWorkspaces(excluding used: Set<UUID>) -> [Workspace] {
+        let now = Date().timeIntervalSince1970
+        return workspaces.enumerated()
+            .filter { !used.contains($0.element.id) }
+            .sorted { a, b in
+                let sa = Frecency.score(a.element, now: now), sb = Frecency.score(b.element, now: now)
+                return sa != sb ? sa > sb : a.offset < b.offset
+            }
+            .map(\.element)
+    }
+
+    /// Where to go when the current workspace is deleted: preferably one no display shows.
+    private func fallbackWorkspace(for removed: UUID) -> UUID {
+        let shown = Set(otherDisplays.values.map(\.workspace)).union([removed])
+        return (rankedWorkspaces(excluding: shown).first ?? workspaces.first { $0.id != removed }!).id
+    }
+
+    /// Brings each other display's selected window back to the front (without activating
+    /// its app), after an activation here pulled windows of the same app over it.
+    private func raiseOtherDisplays() {
+        for state in otherDisplays.values {
+            guard let tab = allTabs.first(where: { $0.id == state.tab }), let wid = tab.windowID,
+                  let app = runningApp(tab.bundleID), !app.isHidden,
+                  let w = AX.windows(pid: app.processIdentifier).first(where: { AX.windowID($0) == wid })
+            else { continue }
+            AXUIElementPerformAction(w, kAXRaiseAction as CFString)
+        }
+    }
+
+    /// Moves a workspace's open windows into a display's content area (used when two
+    /// displays trade workspaces), raising the selected one.
+    private func gather(_ workspaceID: UUID, onto display: DisplayKey, raise tabID: UUID? = nil, except skip: UUID? = nil) {
+        guard AX.isTrusted, let ws = workspaces.first(where: { $0.id == workspaceID }),
+              let frame = contentFrame(on: display).map(AX.toAX) else { return }
+        var top: AXUIElement?
+        for bundleID in Set(ws.tabs.map(\.bundleID)) {
+            guard let app = runningApp(bundleID) else { continue }
+            let windows = AX.windows(pid: app.processIdentifier)
+            for tab in ws.tabs where tab.bundleID == bundleID && tab.id != skip {
+                guard let wid = tab.windowID,
+                      let w = windows.first(where: { AX.windowID($0) == wid }), !AX.isFullScreen(w) else { continue }
+                AX.setFrame(w, frame)
+                if tab.id == tabID { top = w }
+            }
+        }
+        if let top { AX.raise(top) }
     }
 
     func after(_ seconds: Double, _ work: @escaping () -> Void) {
