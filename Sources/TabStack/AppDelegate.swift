@@ -37,6 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         manager.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         manager.onOpenSettings = { [weak self] id in self?.settings.show(workspace: id) }
         manager.onSearch = { [weak self] in self?.search.show() }
+        manager.onExpandSidebar = { [weak self] in
+            guard let self else { return }
+            if self.manager.expanded { self.collapseList(animated: true) } else { self.flashWorkspaceList() }
+        }
         buildMainMenu()
         dock()
         panel.orderFrontRegardless()

@@ -159,6 +159,8 @@ final class WorkspaceManager: ObservableObject {
     var onOpenSettings: ((UUID?) -> Void)?
     /// Opens the workspace search (⌃⌥F). Set by the app delegate.
     var onSearch: (() -> Void)?
+    /// Widens the sidebar into the workspace columns (or closes them). Set by the app delegate.
+    var onExpandSidebar: (() -> Void)?
     /// Whether the user wants the sidebar (⌥⌘0). It may still be hidden temporarily
     /// while a full-screen app is in front; layout follows this flag, not visibility.
     var sidebarShown = true

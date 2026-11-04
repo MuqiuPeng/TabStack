@@ -71,6 +71,8 @@ struct SidebarView: View {
                 .transition(.opacity)
             }
 
+            SettingsMenuButton(manager: manager)
+
             Spacer().frame(height: 6)
         }
         .animation(.easeInOut(duration: 0.2), value: manager.trusted)
@@ -143,7 +145,7 @@ struct WorkspaceMenu: View {
         let current = manager.currentWorkspace
         let index = manager.workspaces.firstIndex(of: current) ?? 0
 
-        Button { showMenu() } label: {
+        Button { manager.onExpandSidebar?() } label: {
             VStack(spacing: 3) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 9).fill(WorkspaceColor.color(for: current, fallback: index))
@@ -175,12 +177,11 @@ struct WorkspaceMenu: View {
         }
         .buttonStyle(PressStyle())
         .onHover { hovering = $0 }
-        .help("工作区：\(current.name)（点击切换或管理）")
+        .help("工作区：\(current.name)（点击展开所有工作区）")
     }
 
     /// Built with AppKit: SwiftUI's borderless Menu flattens custom labels.
-    private func showMenu() {
-        let m = manager
+    static func showMenu(_ m: WorkspaceManager) {
         let current = m.currentWorkspace
         let index = m.workspaces.firstIndex(of: current) ?? 0
         let menu = NSMenu()
@@ -205,6 +206,27 @@ struct WorkspaceMenu: View {
         menu.addItem(ClosureMenuItem("退出 TabStack") { NSApp.terminate(nil) })
 
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+}
+
+/// Bottom of the sidebar: the workspace / settings menu.
+struct SettingsMenuButton: View {
+    @ObservedObject var manager: WorkspaceManager
+    @State private var hovering = false
+
+    var body: some View {
+        Button { WorkspaceMenu.showMenu(manager) } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 15, weight: .regular))
+                .foregroundColor(hovering ? .primary : .secondary)
+                .frame(width: 40, height: 32)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(hovering ? 0.08 : 0)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+        .onHover { hovering = $0 }
+        .animation(Motion.press, value: hovering)
+        .help("工作区与设置")
     }
 }
 
@@ -576,6 +598,12 @@ private struct WorkspaceColumn: View {
                     .foregroundColor(.secondary)
             }
             .padding(.top, 6)
+            .contentShape(Rectangle())
+            // Click a column's header to switch there; the current one's closes the columns.
+            .onTapGesture {
+                if current { manager.onExpandSidebar?() } else { manager.switchWorkspace(workspace.id) }
+            }
+            .help(current ? "收起" : "切换到“\(workspace.name)”")
 
             Rectangle().fill(Color.primary.opacity(0.12)).frame(width: 28, height: 1)
 
