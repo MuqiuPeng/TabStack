@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private lazy var settings = SettingsWindowController(manager: manager)
     private lazy var search = WorkspaceSearchController(manager: manager)
+    private lazy var quickAdd = QuickAddController(manager: manager)
     private lazy var control = ControlServer(manager: manager)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -77,9 +78,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .cycleWorkspace(let offset):
                 if self.manager.cycleWorkspace(offset) != nil { self.flashWorkspaceList() }
             case .search:
+                self.quickAdd.close()
                 self.search.toggle()
             case .closeWindow:
                 self.manager.closeFocusedWindow()
+            case .quickAdd:
+                self.search.close()
+                self.quickAdd.toggle()
             }
         }
         HotKeys.register()

@@ -69,6 +69,7 @@ the top of the sidebar.
 | Switch workspace | Click the workspace icon at the top to expand all of them, or use the gear menu at the bottom, or `⌃⌥1`…`⌃⌥9` (those shown in the sidebar) |
 | Search workspaces | `⌃⌥F` — type a name or window title, `↑↓` to select, `↩` to open. With no query it lists by recommendation, collapsed workspaces included |
 | Close window | `⌃⌥D` — closes the current window, removes it from the list and moves to the neighbouring one |
+| Add to workspace | `⌃⌥A` — the window you are using comes first (`⌃⌥A` `↩` adds it); also other open windows, new Finder / terminal / browser windows, and installed apps by name |
 | Previous / next tab | `⌃⌥↑` / `⌃⌥↓` (cycles within the workspace) |
 | Previous / next workspace | `⌃⌥←` / `⌃⌥→` (cycles) |
 | Show / hide sidebar | `⌥⌘0` (the current app fills the screen once hidden) |

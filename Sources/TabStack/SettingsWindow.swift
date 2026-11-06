@@ -383,6 +383,7 @@ private struct GeneralSettings: View {
                 ShortcutRow(keys: "⌃⌥← / →", action: "上一个 / 下一个工作区（展开工作区总览）")
                 ShortcutRow(keys: "⌃⌥F", action: "搜索工作区（包括已收起的）")
                 ShortcutRow(keys: "⌃⌥D", action: "关闭当前窗口并从列表移除")
+                ShortcutRow(keys: "⌃⌥A", action: "添加窗口或应用到当前工作区")
                 ShortcutRow(keys: "⌥⌘0", action: "显示 / 隐藏侧边栏")
             }
         }
