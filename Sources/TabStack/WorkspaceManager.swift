@@ -269,7 +269,8 @@ final class WorkspaceManager: ObservableObject {
     // MARK: Closing a window (⌃⌥D)
 
     /// Closes the focused window and removes every tab bound to it; then, like closing a
-    /// browser tab, shows the neighboring tab.
+    /// browser tab, shows the neighboring tab. A window that other workspaces also hold
+    /// (WeChat, Claude) is not closed: its tab just leaves this workspace.
     func closeFocusedWindow() {
         guard AX.isTrusted else { AX.requestTrust(); return }
         guard let app = NSWorkspace.shared.frontmostApplication,
@@ -281,6 +282,11 @@ final class WorkspaceManager: ObservableObject {
             if let i = tabs.firstIndex(where: { $0.windowID == id }), tabs[i].id == currentID, tabs.count > 1 {
                 next = i + 1 < tabs.count ? tabs[i + 1] : tabs[i - 1]
             }
+            if let tab = tabs.first(where: { $0.windowID == id }),
+               workspaces.contains(where: { ws in ws.id != currentWorkspaceID && ws.tabs.contains { $0.windowID == id } }) {
+                removeSharedTab(tab, next: next)
+                return
+            }
             for ws in workspaces {
                 for tab in ws.tabs where tab.windowID == id { removeTab(tab.id, from: ws.id) }
             }
@@ -289,6 +295,21 @@ final class WorkspaceManager: ObservableObject {
         HUD.shared.show(title: "已关闭", subtitle: title.isEmpty ? app.localizedName : title,
                         icon: app.bundleIdentifier.map { icon(for: $0) })
         if let next { after(0.3) { [weak self] in self?.select(next) } }
+    }
+
+    /// ⌃⌥D on a window other workspaces also hold: drops it from this workspace only and
+    /// puts it out of sight (unless another tab here still uses its app).
+    private func removeSharedTab(_ tab: AppTab, next: AppTab?) {
+        let name = currentWorkspace.name
+        remove(tab)
+        let stillHere = tabs.contains { $0.bundleID == tab.bundleID }
+        HUD.shared.show(title: "已从“\(name)”移除", subtitle: "\(tab.displayName)（其他工作区仍保留）",
+                        icon: icon(for: tab.bundleID))
+        if let next, let live = tabs.first(where: { $0.id == next.id }) {
+            select(live, alsoHide: stillHere ? [] : [tab.bundleID])
+        } else if !stillHere {
+            runningApp(tab.bundleID)?.hide()
+        }
     }
 
     /// Drag-to-reorder in the sidebar: puts `tabID` where `targetID` is.
@@ -1290,7 +1311,14 @@ final class WorkspaceManager: ObservableObject {
               let bundleID = app.bundleIdentifier,
               let w = AX.focusedWindow(pid: pid), let wid = AX.windowID(w)
         else { return }
-        if bundleID == ClaudeSessions.bundleID { claudeVisited = currentWorkspaceID }
+        // Clicking straight into Claude counts as showing it here.
+        if bundleID == ClaudeSessions.bundleID, claudeVisited != currentWorkspaceID {
+            if let t = tabs.first(where: { $0.bundleID == ClaudeSessions.bundleID }) {
+                syncClaudeSession(showing: t)
+            } else {
+                claudeVisited = currentWorkspaceID
+            }
+        }
         // Working in a window on another display moves the focus (hotkeys, menus) there.
         if let d = display(ofWindow: wid, w) { focusDisplay(d) }
         guard tabs.contains(where: { $0.bundleID == bundleID }) else { return }
@@ -1714,6 +1742,9 @@ final class WorkspaceManager: ObservableObject {
         guard tab.bundleID == claude || (isWide(focusedDisplay) && partner(of: tab)?.bundleID == claude),
               runningApp(claude) != nil else { return }
         let ws = currentWorkspace
+        // Claude was last shown in this same workspace: it still shows this workspace's
+        // session (or one the user picked since), so leave it alone.
+        guard claudeVisited != ws.id else { return }
         claudeVisited = ws.id
         let sent = claudeSent
         DispatchQueue.global(qos: .userInitiated).async {
