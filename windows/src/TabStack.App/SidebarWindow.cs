@@ -12,8 +12,10 @@ using TabStack.Platform.Windows;
 
 namespace TabStack.App;
 
-/// <summary>The bar docked to the left edge: current workspace on top, its tabs below, add and
-/// settings at the bottom. Built in code: it is small and redrawn whole on every change.</summary>
+/// <summary>The bar docked to the left edge of one display: the workspace that display shows on
+/// top, its tabs below, add and settings at the bottom. Built in code: it is small and redrawn
+/// whole on every change. Pressing anything on it makes its display the focused one, so menus
+/// and hotkeys act on its workspace.</summary>
 sealed class SidebarWindow : Window
 {
     public const int WidthDip = 64;
@@ -26,17 +28,21 @@ sealed class SidebarWindow : Window
     readonly AppShell shell;
     readonly StackPanel tabsPanel = new();
     readonly Button workspaceButton;
+    readonly Border focusMark = new() { Height = 3 };
     AppBar? appBar;
     HwndSource? source;
+    MonitorInfo monitor;
+    bool rebuildPending;
 
     public nint Handle { get; private set; }
-    public HotKeys? HotKeys { get; set; }
+    public string Device => monitor.Device;
 
     WorkspaceManager M => shell.Manager;
 
-    public SidebarWindow(AppShell shell)
+    public SidebarWindow(AppShell shell, MonitorInfo monitor)
     {
         this.shell = shell;
+        this.monitor = monitor;
         Title = "TabStack";
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
@@ -45,12 +51,17 @@ sealed class SidebarWindow : Window
         ShowActivated = false;
         Background = Background0;
         Width = WidthDip;
-        Height = SystemParameters.PrimaryScreenHeight;
-        Left = 0;
-        Top = 0;
+        // Roughly there already (the app bar puts it exactly), so it does not flash elsewhere.
+        Left = monitor.Bounds.X * 96.0 / Math.Max(monitor.Dpi, 96);
+        Top = monitor.Bounds.Y * 96.0 / Math.Max(monitor.Dpi, 96);
+        Height = monitor.Bounds.H * 96.0 / Math.Max(monitor.Dpi, 96);
 
         workspaceButton = new Button { Height = 56, Margin = new Thickness(4, 8, 4, 4), ToolTip = "工作区" };
-        workspaceButton.Click += (_, _) => OpenMenu(workspaceButton, WorkspaceMenu());
+        workspaceButton.Click += (_, _) =>
+        {
+            if (M.WorkspaceOn(Device) is null) NewWorkspaceHere();
+            else OpenMenu(workspaceButton, WorkspaceMenu());
+        };
 
         var add = IconButton("＋", "添加窗口到当前工作区");
         add.Click += (_, _) => OpenMenu(add, AddMenu());
@@ -62,6 +73,8 @@ sealed class SidebarWindow : Window
         bottom.Children.Add(gear);
 
         var root = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(focusMark, Dock.Top);
+        root.Children.Add(focusMark);
         DockPanel.SetDock(workspaceButton, Dock.Top);
         DockPanel.SetDock(bottom, Dock.Bottom);
         root.Children.Add(workspaceButton);
@@ -76,6 +89,9 @@ sealed class SidebarWindow : Window
 
         SourceInitialized += (_, _) => OnSourceInitialized();
         Loaded += (_, _) => Rebuild();
+        PreviewMouseDown += (_, _) => M.FocusDisplay(Device);
+        // A rebuild while a button is held would swallow its click: wait for the release.
+        PreviewMouseUp += (_, _) => { if (rebuildPending) Dispatcher.BeginInvoke(Rebuild, DispatcherPriority.Background); };
     }
 
     void OnSourceInitialized()
@@ -86,27 +102,32 @@ sealed class SidebarWindow : Window
         source.AddHook(WndProc);
         appBar = new AppBar(Handle);
         appBar.FullScreenChanged += full => SidebarStyle.SetTopmost(Handle, !full);
-        appBar.Dock(WidthDip);
-        M.Changed += () => Dispatcher.BeginInvoke(Rebuild, DispatcherPriority.Background);
-        SystemEvents_DisplayChanged();
+        appBar.Dock(WidthDip, monitor.Bounds);
+        M.Changed += Refresh;
     }
 
-    /// <summary>Re-dock when displays or DPI change.</summary>
-    void SystemEvents_DisplayChanged() =>
-        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (_, _) => Dispatcher.BeginInvoke(() => appBar?.Dock(WidthDip));
+    /// <summary>Redraw soon (the manager changed).</summary>
+    public void Refresh() => Dispatcher.BeginInvoke(Rebuild, DispatcherPriority.Background);
+
+    /// <summary>The monitor changed (resolution, position, DPI): dock again.</summary>
+    public void Redock(MonitorInfo m)
+    {
+        monitor = m;
+        appBar?.Dock(WidthDip, m.Bounds);
+    }
 
     nint WndProc(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
     {
         const int WM_DPICHANGED = 0x02E0, WM_MOUSEACTIVATE = 0x0021, MA_NOACTIVATE = 3;
         if (appBar?.WndProc((uint)msg, wParam, lParam) == true) { handled = true; return 0; }
-        if (HotKeys?.WndProc((uint)msg, wParam) == true) { handled = true; return 0; }
         if (msg == WM_MOUSEACTIVATE) { handled = true; return MA_NOACTIVATE; }
-        if (msg == WM_DPICHANGED) Dispatcher.BeginInvoke(() => appBar?.Dock(WidthDip));
+        if (msg == WM_DPICHANGED) Dispatcher.BeginInvoke(() => appBar?.Dock(WidthDip, monitor.Bounds));
         return 0;
     }
 
     public void Undock()
     {
+        M.Changed -= Refresh;
         appBar?.Dispose();
         appBar = null;
     }
@@ -115,12 +136,30 @@ sealed class SidebarWindow : Window
 
     void Rebuild()
     {
-        var ws = M.Current;
+        if (!IsLoaded) return;
+        if (IsMouseOver && (Mouse.LeftButton == MouseButtonState.Pressed || Mouse.RightButton == MouseButtonState.Pressed))
+        {
+            rebuildPending = true;
+            return;
+        }
+        rebuildPending = false;
+        var ws = M.WorkspaceOn(Device);
+        var focused = M.FocusedDisplay == Device;
+        tabsPanel.Children.Clear();
+        if (ws is null)
+        {
+            // More displays than workspaces.
+            workspaceButton.Content = new TextBlock { Text = "＋", FontSize = 22, Foreground = Foreground0 };
+            workspaceButton.ToolTip = "这块屏幕还没有工作区（点击新建）";
+            workspaceButton.Style = FlatStyle();
+            focusMark.Background = Brushes.Transparent;
+            return;
+        }
+        focusMark.Background = focused && shell.ManySidebars ? WorkspaceBrush(ws) : Brushes.Transparent;
         workspaceButton.Content = WorkspaceBadge(ws, 40);
         workspaceButton.ToolTip = $"工作区：{ws.Name}（点击切换）";
         workspaceButton.Style = FlatStyle();
 
-        tabsPanel.Children.Clear();
         foreach (var tab in ws.Tabs) tabsPanel.Children.Add(TabButton(ws, tab));
     }
 
@@ -275,6 +314,11 @@ sealed class SidebarWindow : Window
         var index = M.ActiveWorkspaces.ToList().FindIndex(w => w.Id == ws.Id);
         var mi = Item(ws.Name, () => M.SwitchWorkspace(ws.Id), check: ws.Id == M.Current.Id, icon: WorkspaceBadge(ws, 16));
         if (index is >= 0 and < 9) mi.InputGestureText = $"Ctrl+Alt+{index + 1}";
+        if (M.DisplayShowing(ws.Id) is not null)
+        {
+            mi.Header = ws.Name + "（另一块屏幕）";
+            mi.ToolTip = "显示在另一块屏幕上，选择后两块屏幕交换工作区";
+        }
         return mi;
     }
 
@@ -283,6 +327,15 @@ sealed class SidebarWindow : Window
         var name = InputDialog.Ask("新建工作区", "名称：", $"工作区 {M.Workspaces.Count + 1}");
         if (string.IsNullOrWhiteSpace(name)) return;
         M.SwitchWorkspace(M.CreateWorkspace(name.Trim()).Id);
+    }
+
+    /// <summary>A display with no workspace (more displays than workspaces) gets a new one.</summary>
+    void NewWorkspaceHere()
+    {
+        var name = InputDialog.Ask("新建工作区", "名称：", $"工作区 {M.Workspaces.Count + 1}");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        M.CreateWorkspace(name.Trim());
+        M.AssignDisplays();
     }
 
     ContextMenu AddMenu()

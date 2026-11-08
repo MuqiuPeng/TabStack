@@ -128,6 +128,12 @@ public sealed class AppState
     /// <summary>How many workspaces the sidebar shows (the rest are reached by search).</summary>
     public int? ActiveWorkspaceLimit { get; set; }
     public Settings Settings { get; set; } = new();
+    /// <summary>The display whose sidebar was used last; it shows <see cref="CurrentWorkspace"/>.</summary>
+    public string? FocusedDisplay { get; set; }
+    /// <summary>The workspace every other display with a sidebar shows, by monitor id.</summary>
+    public Dictionary<string, Guid>? OtherDisplays { get; set; }
+    /// <summary>What displays showed before they were unplugged, so they get it back.</summary>
+    public Dictionary<string, Guid>? RememberedDisplays { get; set; }
 }
 
 public sealed class Settings
@@ -139,4 +145,7 @@ public sealed class Settings
     public Dictionary<string, string> HotKeys { get; set; } = new();
     /// <summary>New workspaces start in tiling mode.</summary>
     public bool TileNewWorkspaces { get; set; }
+    /// <summary>Monitors (by id) that get no sidebar and show no workspace of their own;
+    /// windows there belong to whichever workspace they are tabs of.</summary>
+    public List<string> NoSidebarMonitors { get; set; } = new();
 }

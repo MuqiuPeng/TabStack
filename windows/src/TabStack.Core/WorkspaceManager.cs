@@ -35,6 +35,7 @@ public sealed class WorkspaceManager
         if (state.CurrentWorkspace is not { } cur || state.Workspaces.All(w => w.Id != cur))
             state.CurrentWorkspace = state.Workspaces[0].Id;
         ValidateBindings();
+        AssignDisplays(apply: false);
         if (Current.Usage is null) Frecency.RecordUse(Current, this.clock());
         lastDwell = this.clock();
         RecomputeActive();
@@ -56,7 +57,126 @@ public sealed class WorkspaceManager
     public void Save() => store.Save(state);
 
     public void RecomputeActive() =>
-        ActiveIDs = Frecency.Active(state.Workspaces, Current.Id, [], ActiveLimit, clock());
+        ActiveIDs = Frecency.Active(state.Workspaces, Current.Id, Others.Values, ActiveLimit, clock());
+
+    // ───────────────────────── Displays ─────────────────────────
+    // As on the Mac: every display with a sidebar shows a workspace of its own. The display
+    // whose sidebar (or window) was used last is "focused" and shows Current; hotkeys and
+    // menus act on it.
+
+    Dictionary<string, Guid> Others => state.OtherDisplays ??= new();
+
+    /// <summary>The monitors that get a sidebar (never none while any monitor exists).</summary>
+    public IReadOnlyList<MonitorInfo> SidebarMonitors() => SidebarMonitors(platform.Monitors());
+
+    IReadOnlyList<MonitorInfo> SidebarMonitors(IReadOnlyList<MonitorInfo> all)
+    {
+        var list = all.Where(m => !state.Settings.NoSidebarMonitors.Contains(m.Device)).ToList();
+        if (list.Count == 0 && all.Count > 0) list.Add(all.FirstOrDefault(m => m.Primary) ?? all[0]);
+        return list;
+    }
+
+    public string? FocusedDisplay => state.FocusedDisplay;
+
+    /// <summary>The workspace a display shows (null: more displays than workspaces).</summary>
+    public Workspace? WorkspaceOn(string device) =>
+        device == state.FocusedDisplay ? Current : Others.TryGetValue(device, out var id) ? Find(id) : null;
+
+    /// <summary>The other display showing a workspace, if any.</summary>
+    public string? DisplayShowing(Guid id) => Others.FirstOrDefault(kv => kv.Value == id).Key;
+
+    /// <summary>Workspaces on screen: the current one first, then the other displays'.</summary>
+    public IEnumerable<Workspace> Displayed =>
+        new[] { Current }.Concat(Others.Values.Select(Find).OfType<Workspace>());
+
+    static HashSet<long> WindowsOf(IEnumerable<Workspace> workspaces) =>
+        workspaces.SelectMany(w => w.Tabs).Where(t => t.Hwnd is not null).Select(t => t.Hwnd!.Value).ToHashSet();
+
+    static MonitorInfo? Monitor(string? device, IReadOnlyList<MonitorInfo> monitors) =>
+        monitors.FirstOrDefault(m => m.Device == device);
+
+    MonitorInfo? DisplayOf(Workspace ws, IReadOnlyList<MonitorInfo> monitors) =>
+        Monitor(ws.Id == Current.Id ? state.FocusedDisplay : DisplayShowing(ws.Id), monitors);
+
+    /// <summary>Makes another display's sidebar the one hotkeys and menus act on.</summary>
+    public bool FocusDisplay(string device)
+    {
+        if (device == state.FocusedDisplay || !Others.TryGetValue(device, out var id) || Find(id) is not { } ws) return false;
+        Others.Remove(device);
+        if (state.FocusedDisplay is { } f) Others[f] = Current.Id;
+        state.FocusedDisplay = device;
+        state.CurrentWorkspace = ws.Id;
+        RecomputeActive();
+        Save();
+        Changed?.Invoke();
+        return true;
+    }
+
+    /// <summary>
+    /// Gives every display with a sidebar a workspace of its own (no two show the same one):
+    /// the one it showed before if still free, else the most used free one. With
+    /// <paramref name="apply"/>, workspaces whose display went away are put away and ones that
+    /// just got a display are brought back on it. Call after displays come or go, after the
+    /// sidebar monitors setting changes and after workspaces are deleted.
+    /// </summary>
+    public void AssignDisplays(bool apply = true)
+    {
+        var monitors = platform.Monitors();
+        var displays = SidebarMonitors(monitors);
+        if (displays.Count == 0) return;
+        var remembered = state.RememberedDisplays ??= new();
+        foreach (var (d, id) in Others) remembered[d] = id;
+        if (state.FocusedDisplay is { } fd) remembered[fd] = Current.Id;
+
+        var connected = displays.Select(m => m.Device).ToList();
+        if (state.FocusedDisplay is not { } focused || !connected.Contains(focused))
+            state.FocusedDisplay = (displays.FirstOrDefault(m => m.Primary) ?? displays[0]).Device;
+
+        var used = new HashSet<Guid> { Current.Id };
+        var next = new Dictionary<string, Guid>();
+        foreach (var d in connected.Where(d => d != state.FocusedDisplay))
+        {
+            if ((Others.TryGetValue(d, out var id) || remembered.TryGetValue(d, out id)) && Find(id) is not null && !used.Contains(id))
+                next[d] = id;
+            else if (Search("").FirstOrDefault(w => !used.Contains(w.Id)) is { } ws)
+                next[d] = ws.Id;
+            else continue; // fewer workspaces than displays: this one shows nothing
+            used.Add(next[d]);
+        }
+        var before = new Dictionary<string, Guid>(Others);
+        state.OtherDisplays = next;
+        if (apply)
+        {
+            var keep = WindowsOf(Displayed);
+            foreach (var id in before.Values.Except(next.Values).Where(id => id != Current.Id))
+            {
+                if (Find(id) is not { } gone) continue;
+                Capture(gone);
+                PutAwayAll(gone, keep);
+            }
+            foreach (var (d, id) in next)
+            {
+                if (before.TryGetValue(d, out var was) && was == id) continue;
+                if (Find(id) is not { } ws) continue;
+                var windows = ws.Tabs.Select(Resolve).OfType<WindowInfo>().Select(w => w.Hwnd).ToHashSet();
+                BringBack(ws, windows, Monitor(d, monitors), activate: false);
+            }
+        }
+        RecomputeActive();
+        if (!apply) return;
+        Save();
+        Changed?.Invoke();
+    }
+
+    void PutAwayAll(Workspace ws, HashSet<long> keep)
+    {
+        foreach (var t in ws.Tabs)
+        {
+            if (t.Hwnd is not { } h || keep.Contains(h)) continue;
+            if (platform.Describe(h) is not { } info || info.Locked) continue;
+            PutAway(h, info.AppID);
+        }
+    }
 
     public List<Workspace> Search(string query) => Frecency.Search(state.Workspaces, query, clock());
 
@@ -114,26 +234,30 @@ public sealed class WorkspaceManager
     {
         if (id == Current.Id || Find(id) is not { } next) return;
         var old = Current;
+        var monitors = platform.Monitors();
+        // Shown on another display already: the two displays trade workspaces, windows and all.
+        var swap = DisplayShowing(id);
+        if (swap is not null) Capture(next);
 
         // Bind the new workspace first, so its windows are known before anything is hidden.
         var keep = new HashSet<long>();
         foreach (var t in next.Tabs)
             if (Resolve(t) is { } w) keep.Add(w.Hwnd);
+        var showing = new HashSet<long>(keep);
 
-        // Remember how the old workspace looked, then put it away.
+        // Remember how the old workspace looked, then put it away (or hand it to the other display).
         Capture(old);
-        foreach (var t in old.Tabs)
-        {
-            if (t.Hwnd is not { } h || keep.Contains(h)) continue;
-            if (platform.Describe(h) is not { } info || info.Locked) continue;
-            PutAway(h, info.AppID);
-        }
+        if (swap is not null) Others[swap] = old.Id;
+        keep.UnionWith(WindowsOf(Others.Values.Select(Find).OfType<Workspace>()));
+        PutAwayAll(old, keep);
 
         state.CurrentWorkspace = next.Id;
         Frecency.RecordUse(next, clock());
         lastDwell = clock();
 
-        BringBack(next, keep);
+        if (swap is not null && Monitor(swap, monitors) is { } there)
+            BringBack(old, WindowsOf([old]), there, activate: false);
+        BringBack(next, showing, Monitor(state.FocusedDisplay, monitors));
         RecomputeActive();
         Save();
         Changed?.Invoke();
@@ -153,8 +277,9 @@ public sealed class WorkspaceManager
     }
 
     /// <summary>Shows a workspace's windows where they were when it was left, in the same
-    /// stacking order, and focuses the window that had the focus.</summary>
-    void BringBack(Workspace ws, HashSet<long> windows)
+    /// stacking order, and (when <paramref name="activate"/>) focuses the window that had the
+    /// focus. Windows last seen on another sidebar display are moved onto <paramref name="display"/>.</summary>
+    void BringBack(Workspace ws, HashSet<long> windows, MonitorInfo? display, bool activate = true)
     {
         foreach (var h in windows) ledger.Remove(h);
         var target = ws.ForegroundTab is { } ft ? ws.Tab(ft) : null;
@@ -165,7 +290,7 @@ public sealed class WorkspaceManager
         if (ws.Tiled == true)
         {
             foreach (var h in windows) platform.Show(h);
-            if (target is not null) ShowTab(ws, target);
+            if (target is not null) ShowTab(ws, target, activate, display);
             return;
         }
 
@@ -176,17 +301,28 @@ public sealed class WorkspaceManager
             .DistinctBy(t => t.Hwnd)
             // Bottom to top: windows that were not on screen first, then the stack reversed.
             .OrderByDescending(t => rank.TryGetValue(t.Id, out var r) ? r : int.MaxValue)
-            .Select(t => (t.Hwnd!.Value, LayoutMath.Fit(t.Placement!, monitors)))
+            .Select(t => (t.Hwnd!.Value, Place(t.Placement!, monitors, display)))
             .ToList();
         var placed = layout.Select(x => x.Item1).ToHashSet();
         foreach (var h in windows) if (!placed.Contains(h)) platform.Show(h);
         platform.ApplyLayout(layout);
 
-        if (target?.Hwnd is { } th && target.Placement?.State != PlacementState.Minimized)
+        if (activate && target?.Hwnd is { } th && target.Placement?.State != PlacementState.Minimized)
         {
             ws.LastTabID = target.Id;
             platform.Activate(th);
         }
+    }
+
+    /// <summary>Where a saved placement goes now: onto <paramref name="display"/> when it was
+    /// on another display with a sidebar (or one that is gone); otherwise just fitted to the
+    /// current monitors. Windows on monitors without a sidebar stay there.</summary>
+    Placement Place(Placement p, IReadOnlyList<MonitorInfo> monitors, MonitorInfo? display)
+    {
+        if (display is null || p.Monitor == display.Device) return LayoutMath.Fit(p, monitors);
+        var saved = Monitor(p.Monitor, monitors);
+        if (saved is not null && state.Settings.NoSidebarMonitors.Contains(saved.Device)) return LayoutMath.Fit(p, monitors);
+        return LayoutMath.Relocate(p, monitors, display);
     }
 
     /// <summary>Records the placement, stacking order and focus of a workspace's windows.
@@ -207,7 +343,7 @@ public sealed class WorkspaceManager
     /// <summary>Debounced snapshot of the current workspace (windows moved, minimized…).</summary>
     public void CaptureCurrent()
     {
-        Capture(Current);
+        foreach (var ws in Displayed) Capture(ws);
         Save();
     }
 
@@ -220,24 +356,25 @@ public sealed class WorkspaceManager
         if (ws.Tab(tabID) is not { } tab) return false;
         ws.LastTabID = tab.Id;
         var w = Resolve(tab);
-        if (w is not null) ShowTab(ws, tab);
+        if (w is not null) ShowTab(ws, tab, activate: true);
         Save();
         Changed?.Invoke();
         return w is not null;
     }
 
-    void ShowTab(Workspace ws, AppTab tab)
+    void ShowTab(Workspace ws, AppTab tab, bool activate, MonitorInfo? display = null)
     {
         var h = tab.Hwnd!.Value;
         ledger.Remove(h);
         if (ws.Tiled != true)
         {
-            platform.Activate(h);
+            if (activate) platform.Activate(h);
+            else platform.Show(h);
             return;
         }
         var partner = tab.PairedWith is { } pid ? ws.Tab(pid) : null;
         var ph = partner is not null ? Resolve(partner)?.Hwnd : null;
-        var work = platform.WorkArea(h);
+        var work = (display ?? DisplayOf(ws, platform.Monitors()))?.WorkArea ?? platform.WorkArea(h);
         if (ph is { } p && p != h)
         {
             // The member listed first goes on the left, whichever of the two was clicked.
@@ -245,10 +382,12 @@ public sealed class WorkspaceManager
             ledger.Remove(p);
             platform.MoveTo(h, LayoutMath.Tile(work, left ? -1 : 1));
             platform.MoveTo(p, LayoutMath.Tile(work, left ? 1 : -1));
-            platform.Activate(p);
+            if (activate) platform.Activate(p);
+            else platform.Show(p);
         }
         else platform.MoveTo(h, work);
-        platform.Activate(h);
+        if (activate) platform.Activate(h);
+        else platform.Show(h);
     }
 
     public void SetTiled(Guid id, bool tiled)
@@ -321,6 +460,14 @@ public sealed class WorkspaceManager
     /// <summary>The user focused a window (by clicking it, Alt+Tab…): select its tab.</summary>
     public void OnForeground(long hwnd)
     {
+        // A window of another display's workspace (or one sitting on another display): that
+        // display's sidebar becomes the focused one.
+        if (Others.Count > 0 && Current.Tabs.All(t => t.Hwnd != hwnd))
+        {
+            var d = Others.FirstOrDefault(kv => Find(kv.Value)?.Tabs.Any(t => t.Hwnd == hwnd) == true).Key;
+            if (d is null && platform.GetPlacement(hwnd)?.Monitor is { } m && Others.ContainsKey(m)) d = m;
+            if (d is not null) FocusDisplay(d);
+        }
         var tab = Current.Tabs.Find(t => t.Hwnd == hwnd);
         if (tab is null || Current.LastTabID == tab.Id) return;
         Current.LastTabID = tab.Id;
@@ -333,7 +480,7 @@ public sealed class WorkspaceManager
     public void Tick()
     {
         var changed = false;
-        foreach (var t in Current.Tabs)
+        foreach (var t in Displayed.SelectMany(w => w.Tabs))
         {
             if (t.Hwnd is not { } h) continue;
             var info = platform.Describe(h);
@@ -376,7 +523,12 @@ public sealed class WorkspaceManager
     {
         if (state.Workspaces.Count < 2 || Find(id) is not { } ws) return;
         if (ws.Id == Current.Id)
-            SwitchWorkspace(state.Workspaces.First(w => w.Id != id).Id);
+        {
+            // Preferably to a workspace no display shows.
+            var shown = Displayed.Select(w => w.Id).ToHashSet();
+            var to = Search("").FirstOrDefault(w => !shown.Contains(w.Id)) ?? state.Workspaces.First(w => w.Id != id);
+            SwitchWorkspace(to.Id);
+        }
         foreach (var t in ws.Tabs)
         {
             if (t.Hwnd is not { } h || !ledger.Contains(h)) continue;
@@ -384,7 +536,9 @@ public sealed class WorkspaceManager
             platform.Show(h);
             ledger.Remove(h);
         }
+        var onOther = DisplayShowing(id);
         state.Workspaces.Remove(ws);
+        if (onOther is not null) AssignDisplays();
         RecomputeActive();
         Save();
         Changed?.Invoke();
@@ -463,7 +617,10 @@ public sealed class WorkspaceManager
         if (tab.Hwnd is { } h && !Current.Tabs.Any(t => t.Hwnd == h) && platform.Describe(h) is { Locked: false } info)
         {
             if (platform.GetPlacement(h) is { } p) tab.Placement = p;
-            PutAway(h, info.AppID);
+            // The target is on screen on another display: move the window there instead.
+            if (DisplayShowing(targetID) is { } d && Monitor(d, platform.Monitors()) is { } there)
+                BringBack(target, [h], there, activate: false);
+            else PutAway(h, info.AppID);
         }
         Save();
         Changed?.Invoke();

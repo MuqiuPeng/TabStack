@@ -122,8 +122,9 @@ public sealed unsafe partial class WindowsPlatform
         mi.monitorInfo.cbSize = (uint)sizeof(MONITORINFOEXW);
         if (!PInvoke.GetMonitorInfo(monitor, ref Unsafe.As<MONITORINFOEXW, MONITORINFO>(ref mi))) return null;
         PInvoke.GetDpiForMonitor(monitor, MONITOR_DPI_TYPE.MDT_EFFECTIVE_DPI, out var dpi, out _);
-        return new MonitorInfo(mi.szDevice.ToString(), ToCore(mi.monitorInfo.rcMonitor), ToCore(mi.monitorInfo.rcWork),
-            (int)dpi, (mi.monitorInfo.dwFlags & 1) != 0);
+        var (id, name) = DisplayIds.For(mi.szDevice.ToString());
+        return new MonitorInfo(id, ToCore(mi.monitorInfo.rcMonitor), ToCore(mi.monitorInfo.rcWork),
+            (int)dpi, (mi.monitorInfo.dwFlags & 1) != 0, name);
     }
 
     /// <summary>rcNormalPosition is in workspace coordinates: relative to the work area of the

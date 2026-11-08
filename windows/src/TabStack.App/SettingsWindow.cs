@@ -14,6 +14,7 @@ sealed class SettingsWindow : Window
     readonly Dictionary<string, TextBox> chordBoxes = new();
     readonly ListBox minimizeList = new() { Height = 110 };
     readonly TextBox limitBox = new() { Width = 48 };
+    readonly Dictionary<string, CheckBox> monitorBoxes = new();
     readonly CheckBox tileNew = new() { Content = "新建的工作区默认使用平铺模式" };
     readonly TextBlock status = new() { Foreground = Brushes.Firebrick, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
 
@@ -36,6 +37,18 @@ sealed class SettingsWindow : Window
         limitBox.Text = M.ActiveLimit.ToString();
         limitRow.Children.Add(limitBox);
         root.Children.Add(limitRow);
+        var monitors = shell.Platform.Monitors();
+        if (monitors.Count > 1)
+        {
+            root.Children.Add(new TextBlock { Text = "在这些显示器上显示侧边栏（每块各显示一个工作区）：", Margin = new Thickness(0, 8, 0, 2) });
+            foreach (var m in monitors.OrderBy(m => m.Bounds.X))
+            {
+                var label = $"{m.Name ?? "显示器"}  {m.Bounds.W}×{m.Bounds.H}" + (m.Primary ? "（主显示器）" : "");
+                var box = new CheckBox { Content = label, IsChecked = !M.Settings.NoSidebarMonitors.Contains(m.Device), Margin = new Thickness(12, 2, 0, 2), ToolTip = m.Device };
+                monitorBoxes[m.Device] = box;
+                root.Children.Add(box);
+            }
+        }
         tileNew.IsChecked = M.Settings.TileNewWorkspaces;
         tileNew.Margin = new Thickness(0, 6, 0, 0);
         root.Children.Add(tileNew);
@@ -120,8 +133,19 @@ sealed class SettingsWindow : Window
             status.Text = "工作区数量请填 1 到 30。";
             return;
         }
+        if (monitorBoxes.Count > 0 && monitorBoxes.Values.All(b => b.IsChecked != true))
+        {
+            status.Foreground = Brushes.Firebrick;
+            status.Text = "至少要在一块显示器上显示侧边栏。";
+            return;
+        }
+        var noSidebar = monitorBoxes.Where(kv => kv.Value.IsChecked != true).Select(kv => kv.Key).ToList();
+        // Monitors not plugged in now keep their setting.
+        noSidebar.AddRange(M.Settings.NoSidebarMonitors.Where(d => !monitorBoxes.ContainsKey(d)));
+        var monitorsChanged = !noSidebar.ToHashSet().SetEquals(M.Settings.NoSidebarMonitors);
         M.UpdateSettings(s =>
         {
+            s.NoSidebarMonitors = noSidebar;
             s.TileNewWorkspaces = tileNew.IsChecked == true;
             s.MinimizeApps = minimizeList.Items.Cast<string>().ToList();
             s.HotKeys = HotKeyMap.All
@@ -130,6 +154,11 @@ sealed class SettingsWindow : Window
         });
         M.ActiveLimit = limit;
         shell.RegisterHotKeys();
+        if (monitorsChanged)
+        {
+            M.AssignDisplays();
+            shell.SyncSidebars();
+        }
 
         foreach (var a in HotKeyMap.All)
         {

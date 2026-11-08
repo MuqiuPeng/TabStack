@@ -19,6 +19,7 @@ public sealed class AppBar : IDisposable
     readonly HWND hwnd;
     bool registered;
     int widthDip;
+    Core.Rect? monitorBounds;
 
     public uint CallbackMessage { get; }
     /// <summary>A full-screen app opened (true) or closed (false) on this monitor.</summary>
@@ -38,17 +39,21 @@ public sealed class AppBar : IDisposable
         uEdge = PInvoke.ABE_LEFT,
     };
 
-    /// <summary>Docks (or re-docks after a display change) on the primary monitor.</summary>
-    public void Dock(int widthDip)
+    /// <summary>Docks (or re-docks after a display change) to the left edge of the monitor
+    /// whose bounds are given (physical pixels), or the primary one.</summary>
+    public void Dock(int widthDip, Core.Rect? monitorBounds = null)
     {
         this.widthDip = widthDip;
+        this.monitorBounds = monitorBounds;
         var data = Data();
         if (!registered)
         {
             PInvoke.SHAppBarMessage(PInvoke.ABM_NEW, ref data);
             registered = true;
         }
-        var monitor = PInvoke.MonitorFromPoint(new System.Drawing.Point(0, 0), MONITOR_FROM_FLAGS.MONITOR_DEFAULTTOPRIMARY);
+        var monitor = monitorBounds is { } b
+            ? PInvoke.MonitorFromRect(new RECT { left = b.X, top = b.Y, right = b.X + b.W, bottom = b.Y + b.H }, MONITOR_FROM_FLAGS.MONITOR_DEFAULTTONEAREST)
+            : PInvoke.MonitorFromPoint(new System.Drawing.Point(0, 0), MONITOR_FROM_FLAGS.MONITOR_DEFAULTTOPRIMARY);
         var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
         PInvoke.GetMonitorInfo(monitor, ref info);
         PInvoke.GetDpiForMonitor(monitor, MONITOR_DPI_TYPE.MDT_EFFECTIVE_DPI, out var dpi, out _);
@@ -70,7 +75,7 @@ public sealed class AppBar : IDisposable
         if (msg != CallbackMessage) return false;
         switch ((uint)wParam)
         {
-            case PInvoke.ABN_POSCHANGED: Dock(widthDip); break;
+            case PInvoke.ABN_POSCHANGED: Dock(widthDip, monitorBounds); break;
             case PInvoke.ABN_FULLSCREENAPP: FullScreenChanged?.Invoke(lParam != 0); break;
         }
         return true;

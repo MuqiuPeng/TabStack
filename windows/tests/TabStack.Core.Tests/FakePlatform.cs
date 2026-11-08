@@ -64,7 +64,7 @@ sealed class FakePlatform : IWindowPlatform
     public void Minimize(long hwnd) { var w = Get(hwnd); w.Minimized = true; w.State = PlacementState.Minimized; }
 
     public Placement? GetPlacement(long hwnd) => Windows.FirstOrDefault(w => w.Hwnd == hwnd) is { } w
-        ? new Placement { State = w.State, NormalRect = w.Rect, ActualRect = w.Rect, Monitor = MonitorList[0].Device, Dpi = 96, Visible = w.Visible && !w.Minimized }
+        ? new Placement { State = w.State, NormalRect = w.Rect, ActualRect = w.Rect, Monitor = LayoutMath.Nearest(w.Rect, MonitorList).Device, Dpi = 96, Visible = w.Visible && !w.Minimized }
         : null;
 
     public void ApplyLayout(IReadOnlyList<(long Hwnd, Placement Placement)> bottomToTop)
@@ -86,5 +86,9 @@ sealed class FakePlatform : IWindowPlatform
 
     public void MoveTo(long hwnd, Rect rect) { var w = Get(hwnd); w.Rect = rect; w.State = PlacementState.Normal; w.Minimized = false; }
 
-    public Rect WorkArea(long hwnd) => MonitorList[0].WorkArea;
+    public Rect WorkArea(long hwnd) => LayoutMath.Nearest(Get(hwnd).Rect, MonitorList).WorkArea;
+
+    /// <summary>A second monitor to the right of the first.</summary>
+    public void AddSecondMonitor() =>
+        MonitorList.Add(new("DISPLAY2", new Rect(1920, 0, 1920, 1080), new Rect(1984, 0, 1856, 1080), 96, false));
 }

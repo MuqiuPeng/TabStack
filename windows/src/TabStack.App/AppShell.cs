@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using TabStack.Core;
 using TabStack.Platform.Windows;
@@ -12,7 +13,10 @@ public sealed class AppShell
     readonly WindowsPlatform platform;
     readonly HiddenLedger ledger;
     WorkspaceManager? manager;
-    SidebarWindow? sidebar;
+    /// <summary>One sidebar per display that has one, by monitor id.</summary>
+    readonly Dictionary<string, SidebarWindow> sidebars = new();
+    /// <summary>Message-only window that receives WM_HOTKEY (sidebars come and go with monitors).</summary>
+    HwndSource? hotkeyWindow;
     Tray? tray;
     WinEvents? events;
     HotKeys? hotkeys;
@@ -34,8 +38,19 @@ public sealed class AppShell
     public void Start()
     {
         manager = new WorkspaceManager(platform, new Store(Path.Combine(Store.DefaultDirectory, "state.json")), ledger);
-        sidebar = new SidebarWindow(this);
-        sidebar.Show();
+        hotkeyWindow = new HwndSource(new HwndSourceParameters("TabStackHotKeys")
+        {
+            ParentWindow = new IntPtr(-3), // HWND_MESSAGE
+            Width = 0, Height = 0, WindowStyle = 0,
+        });
+        hotkeyWindow.AddHook((nint _, int msg, nint wParam, nint _, ref bool handled) =>
+        {
+            if (hotkeys?.WndProc((uint)msg, wParam) == true) handled = true;
+            return 0;
+        });
+        manager.AssignDisplays();
+        SyncSidebars();
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaysChanged;
         tray = new Tray(this);
         manager.Notice += text => { Log.Write(text); tray.Notify(text); };
 
@@ -57,7 +72,44 @@ public sealed class AppShell
         Log.Write("started");
     }
 
-    bool InCurrent(long h) => manager!.Current.Tabs.Any(t => t.Hwnd == h);
+    /// <summary>A window of a workspace on screen (on any display).</summary>
+    bool InCurrent(long h) => manager!.Displayed.Any(w => w.Tabs.Any(t => t.Hwnd == h));
+
+    /// <summary>Monitors came, went or changed resolution: give each its workspace and sidebar.
+    /// The event comes in bursts (and before the shell has moved its windows), so wait a moment.</summary>
+    void OnDisplaysChanged(object? sender, EventArgs e) =>
+        Application.Current.Dispatcher.BeginInvoke(() => Debounce(ref displays, 800, () =>
+        {
+            manager!.AssignDisplays();
+            SyncSidebars();
+        }));
+
+    DispatcherTimer? displays;
+
+    /// <summary>Opens a sidebar on every display that should have one, re-docks the ones that
+    /// stay and closes the rest.</summary>
+    public void SyncSidebars()
+    {
+        var monitors = manager!.SidebarMonitors();
+        foreach (var gone in sidebars.Keys.Where(d => monitors.All(m => m.Device != d)).ToList())
+        {
+            sidebars[gone].Undock();
+            sidebars[gone].Close();
+            sidebars.Remove(gone);
+        }
+        foreach (var m in monitors)
+        {
+            if (sidebars.TryGetValue(m.Device, out var bar)) { bar.Redock(m); continue; }
+            bar = new SidebarWindow(this, m);
+            sidebars[m.Device] = bar;
+            bar.Show();
+        }
+        foreach (var bar in sidebars.Values) bar.Refresh();
+        Log.Write($"sidebars on {string.Join(", ", monitors.Select(m => m.Name ?? m.Device))}");
+    }
+
+    /// <summary>More than one sidebar: the focused one is marked.</summary>
+    public bool ManySidebars => sidebars.Count > 1;
 
     /// <summary>Coalesces bursts of title/destroy events into one refresh.</summary>
     void ScheduleRefresh() => Debounce(ref refresh, 300, () => manager!.Tick());
@@ -83,8 +135,7 @@ public sealed class AppShell
     public void RegisterHotKeys()
     {
         hotkeys?.Dispose();
-        hotkeys = new HotKeys(sidebar!.Handle);
-        sidebar.HotKeys = hotkeys;
+        hotkeys = new HotKeys(hotkeyWindow!.Handle);
         FailedHotKeys.Clear();
         var m = manager!;
         foreach (var a in HotKeyMap.All)
@@ -143,12 +194,14 @@ public sealed class AppShell
     public void Stop()
     {
         timer?.Stop();
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaysChanged;
         hotkeys?.Dispose();
+        hotkeyWindow?.Dispose();
         events?.Dispose();
         var shown = ShowAllHidden();
         manager?.Save();
         tray?.Dispose();
-        sidebar?.Undock();
+        foreach (var bar in sidebars.Values) bar.Undock();
         Log.Write($"stopped; showed {shown} hidden window(s)");
     }
 }

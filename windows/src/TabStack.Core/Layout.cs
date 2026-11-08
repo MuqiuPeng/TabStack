@@ -1,7 +1,9 @@
 namespace TabStack.Core;
 
 /// <summary>A display as the platform reports it (physical pixels).</summary>
-public sealed record MonitorInfo(string Device, Rect Bounds, Rect WorkArea, int Dpi, bool Primary);
+/// <summary>A display as the platform reports it (physical pixels). <see cref="Device"/> is a
+/// stable id (the monitor's device path when known); <see cref="Name"/> is for people.</summary>
+public sealed record MonitorInfo(string Device, Rect Bounds, Rect WorkArea, int Dpi, bool Primary, string? Name = null);
 
 /// <summary>Geometry for restoring a saved placement on the displays that exist now.</summary>
 public static class LayoutMath
@@ -47,11 +49,26 @@ public static class LayoutMath
         var visibleEnough = Overlap(reference, target.WorkArea) * 2 >= (long)reference.W * reference.H;
         if (saved is not null && !dpiChanged && visibleEnough) return p;
 
+        return Place(p, saved, target, keepOffset: saved is not null || Overlap(reference, target.Bounds) > 0);
+    }
+
+    /// <summary>Moves a saved placement onto another monitor (two displays trading workspaces,
+    /// a workspace shown on a different display than last time), keeping its offset within
+    /// the work area and scaling it by the DPI ratio.</summary>
+    public static Placement Relocate(Placement p, IReadOnlyList<MonitorInfo> monitors, MonitorInfo target)
+    {
+        var reference = p.State == PlacementState.Snapped ? p.ActualRect : p.NormalRect;
+        var from = monitors.FirstOrDefault(m => m.Device == p.Monitor) ?? (monitors.Count > 0 ? Nearest(reference, monitors) : null);
+        if (from?.Device == target.Device) return Fit(p, monitors);
+        return Place(p, from, target, keepOffset: from is not null);
+    }
+
+    static Placement Place(Placement p, MonitorInfo? from, MonitorInfo target, bool keepOffset)
+    {
         var scale = p.Dpi > 0 ? (double)target.Dpi / p.Dpi : 1;
         // Keep the window's offset within its monitor when we know where that was; a window
         // from a monitor that is gone is centred instead.
-        var keepOffset = saved is not null || Overlap(reference, target.Bounds) > 0;
-        var origin = saved?.WorkArea ?? target.WorkArea;
+        var origin = from?.WorkArea ?? target.WorkArea;
         Rect Move(Rect r)
         {
             var w = Math.Min((int)Math.Round(r.W * scale), target.WorkArea.W);
