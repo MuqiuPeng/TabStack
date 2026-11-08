@@ -23,6 +23,9 @@ struct AppTab: Identifiable, Codable, Equatable {
     /// Shown side by side with this tab (same workspace) on a wide display: this one on
     /// the left, that one on the right. The sidebar shows the pair as one tab.
     var pairedWith: UUID?
+    /// The window is also a tab in other workspaces (a chat app you want everywhere). Such
+    /// tabs may re-bind to the same window after a restart instead of competing for it.
+    var shared: Bool?
 
     init(bundleID: String, name: String, title: String? = nil, windowID: CGWindowID? = nil) {
         self.id = UUID()
@@ -32,7 +35,7 @@ struct AppTab: Identifiable, Codable, Equatable {
         self.windowID = windowID
     }
 
-    enum CodingKeys: String, CodingKey { case id, bundleID, name, customName, title, windowID, reopen, pairedWith }
+    enum CodingKeys: String, CodingKey { case id, bundleID, name, customName, title, windowID, reopen, pairedWith, shared }
 
     /// Also reads tabs saved by the app-level version (no id / window fields).
     init(from decoder: Decoder) throws {
@@ -45,6 +48,7 @@ struct AppTab: Identifiable, Codable, Equatable {
         windowID = try c.decodeIfPresent(CGWindowID.self, forKey: .windowID)
         reopen = try c.decodeIfPresent(Reopen.self, forKey: .reopen)
         pairedWith = try c.decodeIfPresent(UUID.self, forKey: .pairedWith)
+        shared = try c.decodeIfPresent(Bool.self, forKey: .shared)
     }
 
     /// Identity is the tab, not its changing title.
@@ -487,7 +491,12 @@ final class WorkspaceManager: ObservableObject {
     /// Windows that some tab (in any workspace) is bound to.
     func claimedWindowIDs(except tabID: UUID? = nil) -> Set<CGWindowID> {
         // Claude's one window is shared: each workspace's Claude tab shows it on its own session.
-        Set(allTabs.filter { $0.id != tabID && $0.bundleID != ClaudeSessions.bundleID }.compactMap(\.windowID))
+        // Shared tabs of one app don't take a window away from each other either.
+        let me = tabID.flatMap { id in allTabs.first { $0.id == id } }
+        return Set(allTabs.filter { t in
+            t.id != tabID && t.bundleID != ClaudeSessions.bundleID
+                && !(me?.shared == true && t.shared == true && t.bundleID == me?.bundleID)
+        }.compactMap(\.windowID))
     }
 
     func isBound(_ tab: AppTab) -> Bool {
@@ -1172,6 +1181,37 @@ final class WorkspaceManager: ObservableObject {
             }
         }
         poll()
+    }
+
+    /// Windows that are tabs in other workspaces but not in `workspaceID`, one entry each.
+    func windowsInOtherWorkspaces(than workspaceID: UUID) -> [(tab: AppTab, workspace: Workspace)] {
+        let here = Set(workspaces.first { $0.id == workspaceID }?.tabs.compactMap(\.windowID) ?? [])
+        var seen = Set<CGWindowID>()
+        var out: [(AppTab, Workspace)] = []
+        for ws in workspaces where ws.id != workspaceID {
+            for tab in ws.tabs {
+                guard let id = tab.windowID, isBound(tab), !here.contains(id), seen.insert(id).inserted else { continue }
+                out.append((tab, ws))
+            }
+        }
+        return out
+    }
+
+    /// Also shows another workspace's window in `workspaceID`: both keep a tab for it.
+    func shareWindow(of tab: AppTab, into workspaceID: UUID) {
+        guard let windowID = tab.windowID else { return }
+        updateTab(tab.id) { $0.shared = true }
+        var copy = AppTab(bundleID: tab.bundleID, name: tab.name, title: tab.title, windowID: windowID)
+        copy.reopen = tab.reopen
+        copy.shared = true
+        update(workspaceID) { ws in
+            guard !ws.tabs.contains(where: { $0.windowID == windowID }) else { return }
+            ws.tabs.append(copy)
+        }
+        syncWatcher()
+        if workspaceID == currentWorkspaceID, let added = tabs.first(where: { $0.windowID == windowID }) {
+            select(added)
+        }
     }
 
     func addApp(_ bundleID: String, name: String, to workspaceID: UUID) {

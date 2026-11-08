@@ -86,7 +86,7 @@ final class QuickAddController: NSObject, NSWindowDelegate {
             let name = app.localizedName ?? app.bundleIdentifier ?? "?"
             items.append(QuickAddItem(
                 id: "front", section: "当前窗口", title: win.title.isEmpty ? name : win.title,
-                subtitle: name, icon: m.icon(for: app.bundleIdentifier ?? ""), keywords: name) {
+                subtitle: name, icon: m.icon(for: app.bundleIdentifier ?? ""), keywords: name, bundleID: app.bundleIdentifier ?? "") {
                     m.addWindow(id, title: win.title, of: app, to: workspaceID)
                 })
         }
@@ -98,14 +98,14 @@ final class QuickAddController: NSObject, NSWindowDelegate {
             if entry.windows.isEmpty {
                 items.append(QuickAddItem(
                     id: "app-\(bundleID)", section: "已打开的窗口", title: name, subtitle: "没有窗口，出现后自动绑定",
-                    icon: m.icon(for: bundleID), keywords: bundleID) {
+                    icon: m.icon(for: bundleID), keywords: bundleID, bundleID: bundleID) {
                         m.addApp(bundleID, name: name, to: workspaceID)
                     })
             }
             for w in entry.windows where w.id != frontID {
                 items.append(QuickAddItem(
                     id: "win-\(w.id)", section: "已打开的窗口", title: w.title.isEmpty ? "未命名窗口" : w.title,
-                    subtitle: name, icon: m.icon(for: bundleID), keywords: name) {
+                    subtitle: name, icon: m.icon(for: bundleID), keywords: name, bundleID: bundleID) {
                         m.addWindow(w.id, title: w.title, of: app, to: workspaceID)
                     })
             }
@@ -117,17 +117,26 @@ final class QuickAddController: NSObject, NSWindowDelegate {
                 items.append(QuickAddItem(
                     id: "new-\(app.bundleID)-\(target.profile?.dir ?? "")", section: "新建窗口",
                     title: "新建\(app.name)窗口", subtitle: profile ?? "",
-                    icon: m.icon(for: app.bundleID), keywords: "\(app.name) new 新建 \(profile ?? "")") {
+                    icon: m.icon(for: app.bundleID), keywords: "\(app.name) new 新建 \(profile ?? "")", bundleID: app.bundleID) {
                         m.createWindow(target, in: workspaceID)
                     })
             }
+        }
+
+        for (tab, ws) in m.windowsInOtherWorkspaces(than: workspaceID) {
+            items.append(QuickAddItem(
+                id: "share-\(tab.windowID ?? 0)", section: "其他工作区的窗口（两边都会保留）",
+                title: tab.displayName, subtitle: "\(tab.name) · 在“\(ws.name)”",
+                icon: m.icon(for: tab.bundleID), keywords: "\(tab.bundleID) \(ws.name)", bundleID: tab.bundleID) {
+                    m.shareWindow(of: tab, into: workspaceID)
+                })
         }
 
         let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         for app in InstalledApps.list() where !running.contains(app.bundleID) {
             items.append(QuickAddItem(
                 id: "launch-\(app.bundleID)", section: "打开应用", title: app.name, subtitle: "打开并添加",
-                icon: NSWorkspace.shared.icon(forFile: app.url.path), keywords: app.bundleID, onlyWhenSearching: true) {
+                icon: NSWorkspace.shared.icon(forFile: app.url.path), keywords: app.bundleID, bundleID: app.bundleID, onlyWhenSearching: true) {
                     m.addApp(app.bundleID, name: app.name, to: workspaceID)
                 })
         }
@@ -141,7 +150,7 @@ final class QuickAddController: NSObject, NSWindowDelegate {
         } else {
             let words = q.split(separator: " ").map(String.init)
             let hits = all.filter { item in
-                let text = "\(item.title) \(item.subtitle) \(item.keywords)".lowercased()
+                let text = "\(item.title) \(item.subtitle) \(item.keywords) \(AppNames.aliases(item.bundleID))".lowercased()
                 return words.allSatisfy { text.contains($0) }
             }
             // Names that start with the query first, then the rest in their usual order.
@@ -209,6 +218,7 @@ struct QuickAddItem: Identifiable {
     let subtitle: String
     let icon: NSImage
     let keywords: String
+    var bundleID = ""
     var onlyWhenSearching = false
     let action: () -> Void
 }
@@ -336,5 +346,45 @@ private struct QuickAddView: View {
         }
         .buttonStyle(.plain)
         .onHover { if $0 { model.selection = index } }
+    }
+}
+
+/// Every name an app goes by (英文名、中文名…), so "微信" finds WeChat.
+enum AppNames {
+    private static var cache: [String: String] = [:]
+
+    static func aliases(_ bundleID: String) -> String {
+        guard !bundleID.isEmpty else { return "" }
+        if let hit = cache[bundleID] { return hit }
+        var names = Set<String>()
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID), let bundle = Bundle(url: url) {
+            for key in ["CFBundleDisplayName", "CFBundleName"] {
+                if let n = bundle.infoDictionary?[key] as? String { names.insert(n) }
+            }
+            names.insert(FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: ""))
+            for loc in bundle.localizations {
+                for table in ["InfoPlist", "InfoPlist.loctable"] {
+                    guard let path = bundle.path(forResource: table.components(separatedBy: ".").first,
+                                                 ofType: table.hasSuffix("loctable") ? "loctable" : "strings",
+                                                 inDirectory: nil, forLocalization: loc),
+                          let dict = NSDictionary(contentsOfFile: path) else { continue }
+                    for key in ["CFBundleDisplayName", "CFBundleName"] {
+                        if let n = dict[key] as? String { names.insert(n) }
+                    }
+                }
+            }
+            // A .loctable keeps every language in one file, keyed by language first.
+            if let path = bundle.path(forResource: "InfoPlist", ofType: "loctable"),
+               let dict = NSDictionary(contentsOfFile: path) as? [String: [String: Any]] {
+                for strings in dict.values {
+                    for key in ["CFBundleDisplayName", "CFBundleName"] {
+                        if let n = strings[key] as? String { names.insert(n) }
+                    }
+                }
+            }
+        }
+        let joined = names.joined(separator: " ")
+        cache[bundleID] = joined
+        return joined
     }
 }

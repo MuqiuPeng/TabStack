@@ -564,6 +564,25 @@ enum WindowPicker {
                 menu.addItem(item)
             }
         }
+        let elsewhere = m.windowsInOtherWorkspaces(than: workspaceID)
+        if !elsewhere.isEmpty {
+            menu.addItem(.separator())
+            let item = NSMenuItem(title: "其他工作区的窗口", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            let header = NSMenuItem(title: "两边都会保留这个窗口", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            sub.addItem(header)
+            for (tab, ws) in elsewhere {
+                let icon = m.icon(for: tab.bundleID).copy() as! NSImage
+                icon.size = NSSize(width: 16, height: 16)
+                let title = tab.displayName.count > 50 ? String(tab.displayName.prefix(50)) + "…" : tab.displayName
+                let entry = ClosureMenuItem("\(title)（\(ws.name)）") { m.shareWindow(of: tab, into: workspaceID) }
+                entry.image = icon
+                sub.addItem(entry)
+            }
+            item.submenu = sub
+            menu.addItem(item)
+        }
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem("从“应用程序”文件夹选择…") { m.chooseApplication(to: workspaceID) })
 
