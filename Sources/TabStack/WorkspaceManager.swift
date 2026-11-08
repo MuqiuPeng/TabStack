@@ -201,6 +201,10 @@ final class WorkspaceManager: ObservableObject {
         refreshLiveWindows()
         observeWorkspace()
         watcher.onFocusChange = { [weak self] pid in self?.handleFocus(pid: pid) }
+        watcher.onWindowClosed = { [weak self] in
+            // Let the app settle (and AX forget the window) before looking.
+            self?.after(0.15) { self?.coverClosedWindow() }
+        }
         syncWatcher()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.tick() }
         tick()
@@ -310,6 +314,21 @@ final class WorkspaceManager: ObservableObject {
         } else if !stillHere {
             runningApp(tab.bundleID)?.hide()
         }
+    }
+
+    /// The shown window was closed (red button, ⌘W): whatever sat behind it, often windows
+    /// of other workspaces (same app, so they can't be hidden), shows through. Cover it
+    /// with the neighboring tab, as ⌃⌥D does. The closed tab stays and can be restored.
+    private func coverClosedWindow() {
+        refreshLiveWindows()
+        guard let id = currentID, let cur = tabs.first(where: { $0.id == id }) else { return }
+        if isBound(cur) || partner(of: cur).map(isBound) == true { return } // still showing
+        let list = shownTabs(currentWorkspace)
+        guard let i = list.firstIndex(where: { $0.id == id }) else { return }
+        let order = Array(list[(i + 1)...]) + Array(list[..<i].reversed())
+        // Only tabs whose window is open: covering must not launch or restore anything.
+        guard let next = order.first(where: { runningIDs.contains($0.bundleID) && isBound($0) }) else { return }
+        select(next)
     }
 
     /// Drag-to-reorder in the sidebar: puts `tabID` where `targetID` is.
@@ -846,6 +865,7 @@ final class WorkspaceManager: ObservableObject {
             // A full-screen window lives in its own Space; leave it alone.
             if AX.isFullScreen(w) { SwitchCurtain.shared.reveal(); return }
             app.unhide()
+            if attempt == 0 { watcher.watchClose(w, pid: app.processIdentifier) }
             // Passes: 0 (now), -1 and -2 (follow-ups). Some apps (Chrome) apply a move or
             // resize a moment later and report the old frame until then, so centering a
             // window that refuses the size waits for the last pass.
