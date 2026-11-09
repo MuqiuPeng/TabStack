@@ -416,9 +416,13 @@ private struct TicketPanelView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 1, pinnedViews: []) {
                     ForEach(model.groups, id: \.status) { group in
-                        Text("\(TicketPanelModel.names[group.status] ?? group.status)  \(group.tickets.count)")
+                        HStack(spacing: 5) {
+                            Circle().fill(statusColor(group.status)).frame(width: 7, height: 7)
+                            Text(TicketPanelModel.names[group.status] ?? group.status)
+                                .foregroundColor(statusColor(group.status))
+                            Text("\(group.tickets.count)").foregroundColor(.secondary)
+                        }
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.secondary)
                             .padding(.horizontal, 8)
                             .padding(.top, 8)
                             .padding(.bottom, 2)
@@ -441,9 +445,14 @@ private struct TicketPanelView: View {
         let selected = t.key == model.selectedKey
         return Button { model.selectedKey = t.key } label: {
             HStack(spacing: 8) {
-                Circle().fill(priorityColor(t.priority)).frame(width: 7, height: 7)
+                RoundedRectangle(cornerRadius: 1.5).fill(statusColor(t.status)).frame(width: 3, height: 16)
                 Text(t.id).font(.system(size: 11, design: .monospaced)).foregroundColor(.secondary)
                 Text(t.title).font(.system(size: 12.5)).lineLimit(1)
+                    .foregroundColor(t.status == "done" ? .secondary : .primary)
+                    .strikethrough(t.status == "dropped")
+                if t.priority == "P0" || t.priority == "P1" {
+                    Text(t.priority).font(.system(size: 9, weight: .bold)).foregroundColor(priorityColor(t.priority))
+                }
                 Spacer(minLength: 4)
                 if model.allProjects {
                     Text(t.projectName).font(.system(size: 9)).foregroundColor(.secondary)
@@ -470,7 +479,7 @@ private struct TicketPanelView: View {
                     HStack(spacing: 6) {
                         Text("\(t.projectName) · \(t.id)").font(.system(size: 11, design: .monospaced)).foregroundColor(.secondary)
                         Spacer()
-                        chip(TicketPanelModel.names[t.status] ?? t.status)
+                        statusChip(t.status)
                         chip(t.priority)
                         chip(t.type)
                     }
@@ -546,6 +555,28 @@ private struct TicketPanelView: View {
 
     private func inline(_ s: String) -> AttributedString {
         (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+    }
+
+    private func statusChip(_ status: String) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(statusColor(status)).frame(width: 6, height: 6)
+            Text(TicketPanelModel.names[status] ?? status)
+        }
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundColor(statusColor(status))
+        .padding(.horizontal, 7).padding(.vertical, 2)
+        .background(Capsule().fill(statusColor(status).opacity(0.16)))
+    }
+
+    /// One colour per status, shared with the web board.
+    private func statusColor(_ s: String) -> Color {
+        switch s {
+        case "doing": return .blue
+        case "review": return .orange
+        case "done": return .green
+        case "dropped": return .red
+        default: return .gray
+        }
     }
 
     private func chip(_ text: String) -> some View {
