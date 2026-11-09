@@ -174,10 +174,15 @@ enum AX {
     /// AXWindows nor the remote-token lookup can reach it; WindowServer still knows it, and a
     /// tab only needs its id and title. Only windows that still belong to a Space are taken
     /// from there: an app's ordered-out windows (prebuilt dialogs, login panels) belong to none.
+    /// The same rule applies to windows only the remote-token scan found (WeChat keeps an
+    /// untitled, ordered-out standard window), except minimized ones, which may have no Space.
     static func listedWindows(of app: NSRunningApplication) -> [ListedWindow] {
         let pid = app.processIdentifier
-        var result = windowsIncludingHidden(pid: pid).compactMap { w in
-            windowID(w).map { ListedWindow(id: $0, title: title(w), element: w) }
+        let direct = Set(windows(pid: pid).compactMap(windowID))
+        var result = windowsIncludingHidden(pid: pid).compactMap { w -> ListedWindow? in
+            guard let id = windowID(w) else { return nil }
+            if !direct.contains(id), !isOnSpace(id), (attr(w, kAXMinimizedAttribute) as Bool?) != true { return nil }
+            return ListedWindow(id: id, title: title(w), element: w)
         }
         guard app.isHidden else { return result }
         let known = Set(result.map(\.id))
