@@ -1746,9 +1746,14 @@ final class WorkspaceManager: ObservableObject {
         claudeVisited = nil
         let sent = claudeSent
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let shown = Self.shownSession(ClaudeSessions.all(), sent: sent) else { return }
+            let sessions = ClaudeSessions.all()
+            guard let shown = Self.shownSession(sessions, sent: sent) else { return }
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.workspaces.first(where: { $0.id == id })?.claudeSession != shown else { return }
+                guard let self, let ws = self.workspaces.first(where: { $0.id == id }),
+                      ws.claudeSession != shown else { return }
+                // A session belongs to one workspace: one that another workspace remembers
+                // was only looked at from here (e.g. to read a reply).
+                guard !self.workspaces.contains(where: { $0.id != id && $0.claudeSession == shown }) else { return }
                 self.update(id) { $0.claudeSession = shown }
             }
         }
@@ -1767,6 +1772,8 @@ final class WorkspaceManager: ObservableObject {
         guard claudeVisited != ws.id else { return }
         claudeVisited = ws.id
         let sent = claudeSent
+        // Sessions other workspaces remember are theirs, even when they work in this project.
+        let taken = Set(workspaces.filter { $0.id != ws.id }.compactMap(\.claudeSession))
         DispatchQueue.global(qos: .userInitiated).async {
             let sessions = ClaudeSessions.all()
             let shown = Self.shownSession(sessions, sent: sent)
@@ -1776,7 +1783,7 @@ final class WorkspaceManager: ObservableObject {
             } else {
                 // Never left with Claude in use: the project's latest session, unless
                 // Claude already shows one of the project's sessions.
-                let matches = ClaudeSessions.matching(ws, in: sessions)
+                let matches = ClaudeSessions.matching(ws, in: sessions).filter { !taken.contains($0.id) }
                 target = matches.contains { $0.id == shown } ? nil : matches.first?.id
             }
             guard let target, target != shown else { return }
