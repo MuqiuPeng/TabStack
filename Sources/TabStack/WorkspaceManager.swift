@@ -461,6 +461,7 @@ final class WorkspaceManager: ObservableObject {
         if let d = swapDisplay { otherDisplays[d] = DisplayState(workspace: leftID, tab: currentID) }
 
         rememberClaudeSession(leaving: leftID)
+        after(1) { [weak self] in self?.snapshotBrowsers() }
         let keep = Set(next.tabs.map(\.bundleID)).union(appsOnOtherDisplays)
         let leaving = Array(Set(tabs.map(\.bundleID)).subtracting(keep))
         currentWorkspaceID = id
@@ -1301,10 +1302,15 @@ final class WorkspaceManager: ObservableObject {
 
     private func observeWorkspace() {
         let nc = NSWorkspace.shared.notificationCenter
-        nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+        nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
             self?.refreshRunning()
             self?.syncWatcher()
+            if let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier,
+               AppKind.of(id) == .browser {
+                self?.after(5) { self?.snapshotBrowsers() }
+            }
         }
+        after(2) { [weak self] in self?.snapshotBrowsers() }
         nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
             self?.refreshRunning()
             self?.refreshLiveWindows()
@@ -1339,6 +1345,7 @@ final class WorkspaceManager: ObservableObject {
                 claudeVisited = currentWorkspaceID
             }
         }
+        if AppKind.of(bundleID) == .browser, !tabs.contains(where: { $0.windowID == wid }) { catchLink(bundleID) }
         // Working in a window on another display moves the focus (hotkeys, menus) there.
         if let d = display(ofWindow: wid, w) { focusDisplay(d) }
         guard tabs.contains(where: { $0.bundleID == bundleID }) else { return }
@@ -1718,6 +1725,62 @@ final class WorkspaceManager: ObservableObject {
             }
         }
         if let top { AX.raise(top) }
+    }
+
+    // MARK: Links opened in a browser
+
+    /// Browser windows and tabs seen when the workspace last changed, per browser. A tab
+    /// missing here was opened since; in a window outside the current workspace that means
+    /// a link from another app landed in the browser's frontmost window.
+    private var knownBrowserTabs: [String: (windows: Set<Int>, tabs: Set<Int>)] = [:]
+    private var movingLink = false
+
+    func snapshotBrowsers() {
+        for bundleID in AppKind.browserNames.keys where runningApp(bundleID) != nil {
+            guard let wins = BrowserLinks.windows(bundleID) else { continue }
+            knownBrowserTabs[bundleID] = (Set(wins.map(\.id)), Set(wins.flatMap(\.tabIDs)))
+        }
+    }
+
+    /// A browser window outside the current workspace came to the front: if it just got a
+    /// new tab (a link), moves that tab to this workspace's window of the browser, or to a
+    /// new window added to this workspace when it has none.
+    private func catchLink(_ bundleID: String) {
+        guard !movingLink, let known = knownBrowserTabs[bundleID] else { return }
+        movingLink = true
+        after(0.3) { [weak self] in
+            guard let self else { return }
+            defer { self.movingLink = false }
+            guard let wins = BrowserLinks.windows(bundleID), let front = wins.first,
+                  known.windows.contains(front.id), !known.tabs.contains(front.activeTab),
+                  ["http", "https", "file"].contains(URL(string: front.activeURL)?.scheme ?? "")
+            else { return }
+            let here = self.tabs.filter { $0.bundleID == bundleID && self.isBound($0) }
+            // The workspace's own window is the front one already: nothing to move.
+            if let app = self.runningApp(bundleID),
+               let axFront = AX.focusedWindow(pid: app.processIdentifier), let wid = AX.windowID(axFront),
+               here.contains(where: { $0.windowID == wid }) { return }
+            let windows = self.runningApp(bundleID).map { AX.windows(pid: $0.processIdentifier) } ?? []
+            func scripted(_ tab: AppTab) -> BrowserLinks.Window? {
+                guard let w = windows.first(where: { AX.windowID($0) == tab.windowID }) else { return nil }
+                // The AX title is the active tab's title plus the browser (and profile) name.
+                let title = AX.title(w)
+                return wins.filter { $0.id != front.id && !$0.title.isEmpty && title.hasPrefix($0.title) }
+                    .max { $0.title.count < $1.title.count }
+            }
+            let target = here.first(where: { $0.id == self.currentWorkspace.lastTabID }).flatMap { t in scripted(t).map { (t, $0) } }
+                ?? here.lazy.compactMap { t in scripted(t).map { (t, $0) } }.first
+            if let (tab, win) = target {
+                guard BrowserLinks.move(bundleID, tab: front.activeTab, of: front.id, url: front.activeURL, to: win.id) else { return }
+                self.select(tab)
+                self.after(1) { [weak self] in self?.snapshotBrowsers() }
+            } else {
+                let wsID = self.currentWorkspaceID
+                self.openNewWindow(bundleID: bundleID, in: wsID, trigger: {
+                    BrowserLinks.moveToNewWindow(bundleID, tab: front.activeTab, of: front.id, url: front.activeURL)
+                }) { [weak self] _ in self?.snapshotBrowsers() }
+            }
+        }
     }
 
     // MARK: Claude sessions
