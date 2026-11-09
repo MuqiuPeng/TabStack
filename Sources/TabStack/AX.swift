@@ -235,6 +235,23 @@ enum AX {
 
     /// Ids of every window that currently exists, on screen or not (hidden apps, minimized,
     /// other Spaces). Needs no Accessibility permission.
+    /// Every window WindowServer knows, with the bundle id of the app that owns it. Window
+    /// ids are only unique within one boot: after a restart a tab's old id can name another
+    /// app's window, so "bound" must check the owner too.
+    static func existingWindowOwners() -> [CGWindowID: String] {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
+        else { return [:] }
+        var bundles: [pid_t: String] = [:]
+        var out: [CGWindowID: String] = [:]
+        for info in list {
+            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value else { continue }
+            if bundles[pid] == nil { bundles[pid] = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "" }
+            out[id] = bundles[pid]
+        }
+        return out
+    }
+
     static func existingWindowIDs() -> Set<CGWindowID> {
         guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
         else { return [] }

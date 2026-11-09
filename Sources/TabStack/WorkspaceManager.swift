@@ -159,6 +159,8 @@ final class WorkspaceManager: ObservableObject {
     @Published private(set) var workspaceDirection = 1
     @Published private(set) var runningIDs: Set<String> = []
     @Published private(set) var liveWindowIDs: Set<CGWindowID> = []
+    /// Owner (bundle id) of each live window, so a tab is only bound to a window of its app.
+    private var windowOwners: [CGWindowID: String] = [:]
     @Published private(set) var badges: [String: String] = [:]
     @Published private(set) var trusted = AX.isTrusted
 
@@ -193,6 +195,7 @@ final class WorkspaceManager: ObservableObject {
         static let displays = "displays"
         static let focusedDisplay = "focusedDisplay"
         static let legacyTabs = "tabs"
+        static let bootTime = "bootTime"
     }
 
     init() {
@@ -541,7 +544,15 @@ final class WorkspaceManager: ObservableObject {
     }
 
     func isBound(_ tab: AppTab) -> Bool {
-        tab.windowID.map(liveWindowIDs.contains) ?? false
+        tab.windowID.map { isLive($0, of: tab.bundleID) } ?? false
+    }
+
+    /// The window exists and belongs to that app. An id alone is not enough: ids restart
+    /// from small numbers after a reboot, so an old id may now name another app's window.
+    private func isLive(_ id: CGWindowID, of bundleID: String) -> Bool {
+        guard liveWindowIDs.contains(id) else { return false }
+        // Owner unknown (window seen by AX before the next refresh): trust the id.
+        return windowOwners[id].map { $0.isEmpty || $0 == bundleID } ?? true
     }
 
     /// Whether clicking the tab can show something right away: the app runs and the window
@@ -648,17 +659,38 @@ final class WorkspaceManager: ObservableObject {
         }
     }
 
-    /// The free window that is recognizably this tab's, if any.
-    private func match(_ tab: AppTab, among free: [AXUIElement]) -> AXUIElement? {
-        if let t = tab.title, !t.isEmpty, let w = free.first(where: { AX.title($0) == t }) { return w }
+    /// A title without what changes on its own: a terminal's trailing " — 204×63" size.
+    static func stableTitle(_ t: String) -> String {
+        t.replacingOccurrences(of: #" — \d+×\d+$"#, with: "", options: .regularExpression)
+    }
+
+    /// The free window that is recognizably this tab's, if any. `titleOnly` is the first
+    /// pass after a restart, so tabs whose title still matches get their window before
+    /// weaker fingerprints are tried.
+    private func match(_ tab: AppTab, among free: [AXUIElement], titleOnly: Bool = false) -> AXUIElement? {
+        if let t = tab.title.map(Self.stableTitle), !t.isEmpty {
+            let hits = free.filter { Self.stableTitle(AX.title($0)) == t }
+            // Several windows with one title (terminals in the same folder) say nothing about
+            // which is this tab's, unless the exact title (with size) singles one out.
+            if hits.count == 1 { return hits[0] }
+            if hits.count > 1, let exact = hits.first(where: { AX.title($0) == tab.title }) { return exact }
+        }
+        if titleOnly { return nil }
         guard let reopen = tab.reopen else { return nil }
 
         if let folder = reopen.folder {
             let name = (folder as NSString).lastPathComponent
             if let w = free.first(where: { Restore.editorRootName(fromTitle: AX.title($0)) == name }) { return w }
         }
-        if let doc = reopen.document, let w = free.first(where: { Restore.document(of: $0) == doc }) {
-            return w
+        // A document (a terminal's folder) identifies a window only when it is unambiguous:
+        // one free window shows it and no other unbound tab of the app expects it.
+        if let doc = reopen.document {
+            let hits = free.filter { Restore.document(of: $0) == doc }
+            let rivals = allTabs.filter {
+                $0.id != tab.id && $0.bundleID == tab.bundleID && $0.reopen?.document == doc
+                    && !isBound($0) && $0.windowID != tab.windowID
+            }
+            if hits.count == 1, rivals.isEmpty { return hits[0] }
         }
         if let urls = reopen.urls, !urls.isEmpty, let cache = browserCache[tab.bundleID]?.windows {
             let wanted = Set(urls)
@@ -695,6 +727,9 @@ final class WorkspaceManager: ObservableObject {
         bindUnboundTabs()
         let missing = ws.tabs.filter { tab in
             tab.id != skip && !isBound(tab) && restoring[tab.id] == nil
+                // Terminals are not brought back in the background; clicking the tab opens a
+                // fresh one in its folder.
+                && tab.bundleID != Self.terminalBundle
                 && (isRestorable(tab) || !runningIDs.contains(tab.bundleID))
         }
         for (i, tab) in missing.enumerated() {
@@ -716,11 +751,24 @@ final class WorkspaceManager: ObservableObject {
         guard AX.isTrusted else { return }
         refreshLiveWindows()
         // Tabs that remember a title go first, so they get their own window back.
-        let unbound = allTabs.filter { !isBound($0) && runningIDs.contains($0.bundleID) }
+        let unbound = allTabs.filter {
+            !isBound($0) && runningIDs.contains($0.bundleID)
+                && !(terminalSweep != nil && $0.bundleID == Self.terminalBundle)
+        }
             .sorted { ($0.title?.isEmpty == false ? 0 : 1) < ($1.title?.isEmpty == false ? 0 : 1) }
+        // Pass 1: titles only, so a weaker fingerprint of one tab can't take another tab's
+        // window before that tab is looked at.
         for tab in unbound {
-            guard let app = runningApp(tab.bundleID) else { continue }
-            _ = resolve(tab, pid: app.processIdentifier, interactive: false)
+            guard let app = runningApp(tab.bundleID),
+                  let live = allTabs.first(where: { $0.id == tab.id }), !isBound(live) else { continue }
+            let claimed = claimedWindowIDs(except: tab.id)
+            let free = AX.windows(pid: app.processIdentifier).filter { AX.windowID($0).map { !claimed.contains($0) } ?? false }
+            if let w = match(live, among: free, titleOnly: true) { _ = bindResolved(live, w) }
+        }
+        for tab in unbound {
+            guard let app = runningApp(tab.bundleID),
+                  let live = allTabs.first(where: { $0.id == tab.id }), !isBound(live) else { continue }
+            _ = resolve(live, pid: app.processIdentifier, interactive: false)
         }
     }
 
@@ -730,6 +778,7 @@ final class WorkspaceManager: ObservableObject {
             $0.title = title
         }
         liveWindowIDs.insert(windowID)
+        if let bundleID = allTabs.first(where: { $0.id == tabID })?.bundleID { windowOwners[windowID] = bundleID }
     }
 
     // MARK: Reopen recipes
@@ -973,6 +1022,7 @@ final class WorkspaceManager: ObservableObject {
         let tab = AppTab(bundleID: bundleID, name: app.localizedName ?? bundleID, title: title, windowID: id)
         updateCurrent { $0.tabs.append(tab) }
         liveWindowIDs.insert(id)
+        windowOwners[id] = bundleID
         syncWatcher()
         select(tab)
     }
@@ -1151,6 +1201,7 @@ final class WorkspaceManager: ObservableObject {
             ws.tabs.append(AppTab(bundleID: bundleID, name: app.localizedName ?? bundleID, title: title, windowID: id))
         }
         liveWindowIDs.insert(id)
+        windowOwners[id] = bundleID
         syncWatcher()
     }
 
@@ -1384,7 +1435,8 @@ final class WorkspaceManager: ObservableObject {
     }
 
     private func refreshLiveWindows() {
-        let ids = AX.existingWindowIDs()
+        windowOwners = AX.existingWindowOwners()
+        let ids = Set(windowOwners.keys)
         if ids != liveWindowIDs { liveWindowIDs = ids }
     }
 
@@ -1420,6 +1472,7 @@ final class WorkspaceManager: ObservableObject {
            Date().timeIntervalSince1970 - last > Frecency.dwellInterval { recordUse(currentWorkspaceID) }
         else if currentWorkspace.usage == nil { recordUse(currentWorkspaceID) }
         guard t else { return }
+        sweepRestoredTerminals()
         bindUnboundTabs()
         refreshTitles()
         if tickCount % 5 == 1 { captureRecipes() }
@@ -1450,6 +1503,7 @@ final class WorkspaceManager: ObservableObject {
             currentWorkspaceID = workspaces[0].id
         }
         currentID = currentWorkspace.lastTabID
+        forgetWindowIDsAfterReboot()
         // Pin each workspace's color to the one it showed so far (it used to follow position).
         for i in workspaces.indices where workspaces[i].color == nil {
             workspaces[i].color = i % WorkspaceColor.palette.count
@@ -1465,6 +1519,67 @@ final class WorkspaceManager: ObservableObject {
             focusedDisplay = Displays.primaryKey
         }
         assignDisplays() // also saves; persists ids given to tabs migrated from the app-level format
+    }
+
+    /// Window ids only mean something within one boot. After a restart every saved id is
+    /// stale, and the small ids the new boot hands out may collide with them, so each one is
+    /// moved out of the range real windows use. Tabs that shared a window keep sharing the
+    /// same stale id, so they rebind together (`bind` moves followers) once their window is
+    /// recognized again.
+    private func forgetWindowIDsAfterReboot() {
+        var tv = timeval()
+        var size = MemoryLayout<timeval>.size
+        guard sysctlbyname("kern.boottime", &tv, &size, nil, 0) == 0 else { return }
+        let boot = Int(tv.tv_sec)
+        let defaults = UserDefaults.standard
+        let last = defaults.integer(forKey: Keys.bootTime)
+        defaults.set(boot, forKey: Keys.bootTime)
+        guard last != 0, abs(last - boot) > 5 else { return }
+        // Terminals are not restored after a restart: close the windows the system brings
+        // back, as long as this runs soon after the boot (later, the user may be using them).
+        let bootDate = Date(timeIntervalSince1970: TimeInterval(boot))
+        if Date().timeIntervalSince(bootDate) < 300 {
+            terminalSweep = (boot: bootDate, until: Date().addingTimeInterval(120))
+        }
+        var n = 0
+        for w in workspaces.indices {
+            for t in workspaces[w].tabs.indices {
+                guard let id = workspaces[w].tabs[t].windowID, id & Self.staleBit == 0 else { continue }
+                workspaces[w].tabs[t].windowID = id | Self.staleBit
+                n += 1
+            }
+        }
+        debugLog("reboot detected: \(n) saved window ids marked stale")
+    }
+
+    /// Set on window ids saved before a reboot; no live window has an id this large.
+    static let staleBit: CGWindowID = 0x8000_0000
+
+    static let terminalBundle = "com.apple.Terminal"
+
+    /// While set (just after a reboot), Terminal windows the system restores are closed.
+    private var terminalSweep: (boot: Date, until: Date)?
+    private var terminalSwept = false
+
+    /// Closes the Terminal windows macOS reopened at login. Only a Terminal the system
+    /// started (within three minutes of the boot) is touched, and only the windows it has
+    /// right after launching; windows opened later are the user's.
+    private func sweepRestoredTerminals() {
+        guard let sweep = terminalSweep else { return }
+        let now = Date()
+        guard now < sweep.until else { terminalSweep = nil; return }
+        guard let app = runningApp(Self.terminalBundle) else { return }
+        // A Terminal tab the user just clicked is opening its own fresh window: leave it.
+        guard !restoring.keys.contains(where: { id in allTabs.first { $0.id == id }?.bundleID == Self.terminalBundle })
+        else { return }
+        let launched = app.launchDate ?? now
+        guard launched.timeIntervalSince(sweep.boot) < 180 else { terminalSweep = nil; return }
+        if terminalSwept && now.timeIntervalSince(launched) > 20 { terminalSweep = nil; return }
+        let windows = AX.windowsIncludingHidden(pid: app.processIdentifier)
+        var closed = 0
+        for w in windows where AX.close(w) { closed += 1 }
+        if closed > 0 { debugLog("closed \(closed) Terminal windows restored after the reboot") }
+        terminalSwept = true
     }
 
     private func save() {
