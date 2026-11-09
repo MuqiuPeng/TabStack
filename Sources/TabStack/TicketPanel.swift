@@ -31,6 +31,13 @@ final class TicketPanelController: NSObject, NSWindowDelegate {
         model.workspaceName = manager.currentWorkspace.name
         model.focusToken += 1
         model.loadReports()
+        // The first ⌃⌥T of the day opens on today's plan.
+        let today = DailyReport.today
+        if model.reportDates.first == today, UserDefaults.standard.string(forKey: "ticketPlanShown") != today {
+            UserDefaults.standard.set(today, forKey: "ticketPlanShown")
+            model.reportIndex = 0
+            model.showReport = true
+        }
         reload()
 
         let panel = self.panel ?? makePanel()
@@ -54,7 +61,12 @@ final class TicketPanelController: NSObject, NSWindowDelegate {
                 let cmd = e.modifierFlags.contains(.command)
                 switch e.keyCode {
                 case 53: self.close(); return nil                         // esc
-                case 36, 76 where !self.model.showReport: self.jump(); return nil // return
+                case 36, 76 where self.model.showReport:                 // return on the plan
+                    if let f = self.model.currentFocus { self.focusAction(f) } else { NSSound.beep() }
+                    return nil
+                case 36, 76: self.jump(); return nil                      // return
+                case 125 where self.model.showReport: self.model.moveFocus(1); return nil
+                case 126 where self.model.showReport: self.model.moveFocus(-1); return nil
                 case 125: self.model.move(1); return nil                  // down
                 case 126: self.model.move(-1); return nil                 // up
                 case 48: self.model.cycleView(); return nil               // tab: workspace → all → report
@@ -128,6 +140,21 @@ final class TicketPanelController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// A focus item's main action: accept it if it waits for review, else go to its session.
+    fileprivate func focusAction(_ f: DailyReport.Focus) {
+        if f.kind == "review" {
+            TicketDeckCLI.run(["set", f.id, "status=done"], in: f.root) { [weak self] ok in
+                if !ok { NSSound.beep() }
+                self?.reload()
+            }
+        } else {
+            model.showReport = false
+            model.allProjects = true
+            model.selectedKey = f.root + "#" + f.id
+            jump()
+        }
+    }
+
     /// To the workspace that holds the ticket's project, with Claude on the ticket's session.
     fileprivate func jump() {
         guard let t = model.selected else { NSSound.beep(); return }
@@ -170,7 +197,8 @@ final class TicketPanelController: NSObject, NSWindowDelegate {
         let view = TicketPanelView(model: model,
                                    onJump: { [weak self] in self?.jump() },
                                    onStatus: { [weak self] s in self?.setStatus(s) },
-                                   onCheck: { [weak self] t, i, on in self?.toggleCheck(t, index: i, on: on) })
+                                   onCheck: { [weak self] t, i, on in self?.toggleCheck(t, index: i, on: on) },
+                                   onFocus: { [weak self] f in self?.focusAction(f) })
         let hosting = NSHostingView(rootView: view)
         hosting.frame = panel.contentRect(forFrameRect: panel.frame)
         panel.contentView = hosting
@@ -286,8 +314,11 @@ struct TicketItem: Decodable, Identifiable, Equatable {
 
     /// Body up to the log, and the log lines (newest last).
     var parts: (description: String, log: [String]) {
-        guard let r = body.range(of: "\n## Log\n") ?? (body.hasPrefix("## Log\n") ? body.range(of: "## Log\n") : nil)
-        else { return (body, []) }
+        // "## 日志" since tickets are written in Chinese; "## Log" in older ones.
+        let heading = ["## 日志", "## Log"].lazy.compactMap { h in
+            body.range(of: "\n\(h)\n") ?? (body.hasPrefix("\(h)\n") ? body.range(of: "\(h)\n") : nil)
+        }.first
+        guard let r = heading else { return (body, []) }
         let log = body[r.upperBound...].split(separator: "\n").map { String($0).replacingOccurrences(of: "- ", with: "", options: .anchored) }
         return (String(body[..<r.lowerBound]), log)
     }
@@ -317,7 +348,7 @@ final class TicketPanelModel: ObservableObject {
     @Published var showReport = false
     @Published var reportDates: [String] = []
     @Published var reportIndex = 0
-    @Published var reportText: String?
+    @Published var report: DailyReport?
 
     static var reportsDir: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ticketdeck/reports")
@@ -334,7 +365,7 @@ final class TicketPanelModel: ObservableObject {
     func loadReports() {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: Self.reportsDir.path)) ?? []
         let shown = reportDates.indices.contains(reportIndex) ? reportDates[reportIndex] : nil
-        reportDates = names.filter { $0.range(of: #"^\d{4}-\d{2}-\d{2}\.md$"#, options: .regularExpression) != nil }
+        reportDates = names.filter { $0.range(of: #"^\d{4}-\d{2}-\d{2}\.json$"#, options: .regularExpression) != nil }
             .map { String($0.prefix(10)) }.sorted(by: >)
         reportIndex = shown.flatMap { reportDates.firstIndex(of: $0) } ?? 0
         readReport()
@@ -347,8 +378,35 @@ final class TicketPanelModel: ObservableObject {
     }
 
     private func readReport() {
-        guard reportDates.indices.contains(reportIndex) else { reportText = nil; return }
-        reportText = try? String(contentsOf: Self.reportsDir.appendingPathComponent("\(reportDates[reportIndex]).md"), encoding: .utf8)
+        guard reportDates.indices.contains(reportIndex),
+              let data = try? Data(contentsOf: Self.reportsDir.appendingPathComponent("\(reportDates[reportIndex]).json"))
+        else { report = nil; return }
+        report = try? JSONDecoder().decode(DailyReport.self, from: data)
+        focusIndex = 0
+    }
+
+    @Published var focusIndex = 0
+
+    var currentFocus: DailyReport.Focus? {
+        guard let f = report?.focus, f.indices.contains(focusIndex) else { return nil }
+        return f[focusIndex]
+    }
+
+    func moveFocus(_ d: Int) {
+        guard let n = report?.focus.count, n > 0 else { return }
+        focusIndex = min(max(focusIndex + d, 0), n - 1)
+    }
+
+    /// The ticket's status now (the report is a morning snapshot).
+    func liveStatus(root: String, id: String) -> String? {
+        projects.first { $0.path == root }?.tickets.first { $0.id == id }?.status
+    }
+
+    /// From a report row to the ticket in the list.
+    func openTicket(root: String, id: String) {
+        showReport = false
+        allProjects = true
+        selectedKey = root + "#" + id
     }
     @Published var selectedKey: String?
     @Published var error: String?
@@ -406,6 +464,8 @@ private struct TicketPanelView: View {
     let onJump: () -> Void
     let onStatus: (String) -> Void
     let onCheck: (TicketItem, Int, Bool) -> Void
+    let onFocus: (DailyReport.Focus) -> Void
+    @State private var openFolds: Set<String> = []
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -437,25 +497,42 @@ private struct TicketPanelView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "checklist").foregroundColor(.secondary)
-            TextField("Search tickets", text: $model.query)
-                .textFieldStyle(.plain)
-                .font(.system(size: 18))
-                .focused($focused)
+            if model.showReport {
+                Image(systemName: "sun.max").foregroundColor(.orange)
+                Text("今日计划").font(.system(size: 18, weight: .medium))
+                Spacer()
+            } else {
+                Image(systemName: "checklist").foregroundColor(.secondary)
+                TextField("Search tickets", text: $model.query)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 18))
+                    .focused($focused)
+            }
+            Button {
+                model.showReport.toggle()
+                if model.showReport { model.loadReports() }
+            } label: {
+                Label("今日计划", systemImage: "sun.max")
+                    .font(.system(size: 12, weight: .medium))
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(model.showReport ? Color.orange.opacity(0.2) : Color.primary.opacity(0.06)))
+                    .foregroundColor(model.showReport ? .orange : .primary)
+            }
+            .buttonStyle(.plain)
             Picker("", selection: Binding(
-                get: { model.showReport ? 2 : model.allProjects ? 1 : 0 },
+                get: { model.allProjects ? 1 : 0 },
                 set: { v in
-                    model.showReport = v == 2
-                    if v < 2 { model.allProjects = v == 1 } else { model.loadReports() }
+                    model.showReport = false
+                    model.allProjects = v == 1
                     model.clampSelection()
                 })) {
                 Text(model.workspaceName.isEmpty ? "This workspace" : model.workspaceName).tag(0)
                 Text("All projects").tag(1)
-                Text("Report").tag(2)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 290)
+            .frame(width: 210)
+            .opacity(model.showReport ? 0.5 : 1)
         }
         .padding(.horizontal, 16)
         .frame(height: 50)
@@ -645,61 +722,212 @@ private struct TicketPanelView: View {
         }
     }
 
-    /// The daily report, drawn from its markdown line by line (headings, notes, bullets, table).
+    /// 今日计划: the day's summary and up to three focus items, everything else folded away.
     @ViewBuilder private var report: some View {
-        if let text = model.reportText {
+        if let r = model.report {
             ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(model.reportDates[model.reportIndex]).font(.system(size: 11, design: .monospaced)).foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(r.dayTitle).font(.system(size: 17, weight: .semibold))
+                        Text(r.statusLine).font(.system(size: 11.5)).foregroundColor(.secondary)
                         Spacer()
-                        Text("\(model.reportIndex + 1) of \(model.reportDates.count)").font(.system(size: 10)).foregroundColor(.secondary)
+                        if model.reportDates.count > 1 {
+                            Text("\(model.reportIndex + 1) / \(model.reportDates.count)").font(.system(size: 10)).foregroundColor(.secondary)
+                        }
                     }
-                    ForEach(Array(text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, sub in
-                        reportLine(String(sub))
+                    if let summary = r.summary, !summary.isEmpty {
+                        Text(summary).font(.system(size: 13)).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 10)
+                    }
+                    Text("今日重点").font(.system(size: 11)).foregroundColor(.secondary).padding(.top, 16).padding(.bottom, 6)
+                    if r.focus.isEmpty {
+                        Text("今天没有需要你优先处理的任务。").font(.system(size: 12.5)).foregroundColor(.secondary)
+                    }
+                    VStack(spacing: 6) {
+                        ForEach(Array(r.focus.enumerated()), id: \.offset) { n, f in focusRow(f, n) }
+                    }
+                    VStack(spacing: 0) {
+                        Divider().padding(.top, 14)
+                        fold("昨日进展", r.activity.count, .green) {
+                            ForEach(r.activity, id: \.root) { a in
+                                HStack(spacing: 6) {
+                                    Text(a.project).font(.system(size: 12)).frame(width: 160, alignment: .leading)
+                                    if a.done > 0 { pill("完成 \(a.done)", .green) }
+                                    if a.updated > 0 { pill("更新 \(a.updated)", .blue) }
+                                    if a.created > 0 { pill("新增 \(a.created)", .gray) }
+                                    Spacer()
+                                }
+                            }
+                        }
+                        fold("进行中", r.doing.count, .blue) { foldList(r.doing) }
+                        fold("待验收", r.review.count, .orange) { foldList(r.review) }
+                        fold("待决策与待执行", r.totals.decisions, .purple) {
+                            foldList(r.decisions)
+                            if r.totals.decisions > r.decisions.count {
+                                Text("另有 \(r.totals.decisions - r.decisions.count) 项，在 All projects 里搜 decision 或 needs-user")
+                                    .font(.system(size: 10.5)).foregroundColor(.secondary)
+                            }
+                        }
+                        fold("待纳入计划", r.leftovers?.count ?? 0, .yellow) {
+                            ForEach(Array((r.leftovers ?? []).enumerated()), id: \.offset) { _, l in
+                                HStack(spacing: 6) {
+                                    Text(l.project).font(.system(size: 12)).foregroundColor(.secondary)
+                                    Text(l.task).font(.system(size: 12)).lineLimit(1)
+                                    Spacer()
+                                }
+                            }
+                        }
                     }
                 }
-                .padding(.horizontal, 22).padding(.vertical, 14)
+                .padding(.horizontal, 22).padding(.vertical, 16)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         } else {
-            Text("No report yet. TicketDeck writes one every morning at 8:00\n(or run `ticketdeck report --save`).")
+            Text("还没有今日计划。每天早上 8 点自动生成\n（也可以运行 ticketdeck report --save）。")
                 .multilineTextAlignment(.center).foregroundColor(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    @ViewBuilder private func reportLine(_ line: String) -> some View {
-        let s = line.trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("# ") {
-            Text(s.dropFirst(2)).font(.system(size: 17, weight: .semibold)).padding(.top, 2)
-        } else if s.hasPrefix("## ") {
-            Text(s.dropFirst(3)).font(.system(size: 13, weight: .semibold)).padding(.top, 10)
-        } else if s.hasPrefix("|") {
-            if !s.contains("---") {
-                let cells = s.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
-                HStack(spacing: 0) {
-                    ForEach(Array(cells.enumerated()), id: \.offset) { i, c in
-                        Text(c).font(.system(size: 11.5, weight: cells.first == "Project" ? .semibold : .regular))
-                            .frame(width: i == 0 ? 220 : 64, alignment: i == 0 ? .leading : .trailing)
+    private static let kinds: [String: (String, Color)] = [
+        "review": ("待验收", .orange), "decision": ("待决策", .purple),
+        "action": ("需你执行", .purple), "push": ("优先推进", .blue),
+    ]
+
+    private func focusRow(_ f: DailyReport.Focus, _ n: Int) -> some View {
+        let (label, color) = Self.kinds[f.kind] ?? ("优先推进", .blue)
+        let status = model.liveStatus(root: f.root, id: f.id)
+        let finished = status == "done" || status == "dropped"
+        let selected = n == model.focusIndex
+        return HStack(spacing: 12) {
+            Text("\(n + 1)").font(.system(size: 17, weight: .semibold)).foregroundColor(finished ? .secondary : color).frame(width: 16)
+            VStack(alignment: .leading, spacing: 3) {
+                (Text(f.project + " · ").foregroundColor(.secondary) + Text(f.title))
+                    .font(.system(size: 13)).lineLimit(2).strikethrough(finished)
+                HStack(spacing: 8) {
+                    Text(finished ? "已完成" : label).font(.system(size: 10.5, weight: .medium)).foregroundColor(finished ? .green : color)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill((finished ? Color.green : color).opacity(0.15)))
+                    if f.idleDays >= 2 && !finished {
+                        Text("\(f.idleDays) 天未推进").font(.system(size: 10.5)).foregroundColor(.secondary)
+                    }
+                    if let reason = f.reason {
+                        Text(reason).font(.system(size: 11)).lineLimit(1)
                     }
                 }
             }
-        } else if s.hasPrefix("- ") {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("•").foregroundColor(.secondary)
-                Text(inline(String(s.dropFirst(2)))).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 6)
+            if !finished {
+                Button(f.kind == "review" ? "验收通过" : f.session?.hasPrefix("local_") == true ? "继续会话" : "查看") { onFocus(f) }
+                    .controlSize(.small)
             }
-        } else if s.hasPrefix("_") && s.hasSuffix("_") {
-            Text(s.dropFirst().dropLast()).font(.system(size: 11)).foregroundColor(.secondary)
-        } else if !s.isEmpty {
-            Text(inline(s)).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
         }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 9).fill(selected ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.08)))
+        .opacity(finished ? 0.6 : 1)
+        .contentShape(Rectangle())
+        .onTapGesture { model.focusIndex = n }
+    }
+
+    /// A folded section: one line with a count; click to open.
+    @ViewBuilder private func fold<Content: View>(_ title: String, _ count: Int, _ c: Color, @ViewBuilder _ content: () -> Content) -> some View {
+        if count > 0 {
+            let open = openFolds.contains(title)
+            VStack(alignment: .leading, spacing: 4) {
+                Button {
+                    if open { openFolds.remove(title) } else { openFolds.insert(title) }
+                } label: {
+                    HStack(spacing: 7) {
+                        Circle().fill(c).frame(width: 6, height: 6)
+                        Text(title).font(.system(size: 12.5))
+                        Spacer()
+                        Text("\(count)").font(.system(size: 11)).foregroundColor(.secondary)
+                        Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
+                            .rotationEffect(.degrees(open ? 90 : 0))
+                    }
+                    .padding(.vertical, 7)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                if open { VStack(alignment: .leading, spacing: 3) { content() }.padding(.leading, 13).padding(.bottom, 8) }
+                Divider()
+            }
+        }
+    }
+
+    private func foldList(_ items: [DailyReport.Item]) -> some View {
+        ForEach(items, id: \.key) { i in
+            Button { model.openTicket(root: i.root, id: i.id) } label: {
+                HStack(spacing: 6) {
+                    Text(i.project).font(.system(size: 12)).foregroundColor(.secondary)
+                    Text(i.title).font(.system(size: 12)).lineLimit(1)
+                    Spacer()
+                    if i.stale == true { Text("停滞").font(.system(size: 10.5)).foregroundColor(.red) }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func tile(_ n: Int, _ label: String, _ c: Color) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("\(n)").font(.system(size: 20, weight: .bold)).foregroundColor(n > 0 ? c : .secondary)
+            Text(label).font(.system(size: 10.5)).foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(n > 0 ? c.opacity(0.14) : Color.primary.opacity(0.05)))
+    }
+
+    private func sectionTitle(_ t: String, _ c: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(c).frame(width: 7, height: 7)
+            Text(t).font(.system(size: 12, weight: .semibold)).foregroundColor(c)
+        }
+    }
+
+    @ViewBuilder private func reportSection(_ title: String, _ c: Color, _ items: [DailyReport.Item], more: String? = nil) -> some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                sectionTitle(title, c)
+                ForEach(items, id: \.key) { i in
+                    Button { model.openTicket(root: i.root, id: i.id) } label: {
+                        HStack(spacing: 6) {
+                            RoundedRectangle(cornerRadius: 1.5).fill(i.stale == true ? Color.red : c).frame(width: 3, height: 14)
+                            Text(i.priority).font(.system(size: 9.5, weight: .bold))
+                                .foregroundColor(i.priority == "P0" ? .red : i.priority == "P1" ? .orange : .secondary)
+                            projectChip(i.project)
+                            Text(i.title).font(.system(size: 12.5)).lineLimit(1)
+                            Spacer(minLength: 4)
+                            if i.stale == true { Text("停滞").font(.system(size: 10, weight: .semibold)).foregroundColor(.red) }
+                        }
+                        .padding(.vertical, 3).padding(.horizontal, 4)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                if let more { Text(more).font(.system(size: 10.5)).foregroundColor(.secondary).padding(.leading, 13) }
+            }
+        }
+    }
+
+    private func projectChip(_ name: String) -> some View {
+        Text(name).font(.system(size: 9.5)).foregroundColor(.accentColor)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+    }
+
+    private func pill(_ t: String, _ c: Color) -> some View {
+        Text(t).font(.system(size: 10.5)).foregroundColor(c)
+            .padding(.horizontal, 6).padding(.vertical, 1)
+            .background(Capsule().fill(c.opacity(0.15)))
     }
 
     private var footer: some View {
         HStack {
-            Text(model.showReport ? "←→ older / newer   Tab tickets   esc close"
+            Text(model.showReport ? "↑↓ 选择   ↩ 执行   ←→ 前一天 / 后一天   Tab 回到任务列表   esc 关闭"
                                   : "↑↓ select   ↩ open session   ⌘D done   ⌘R to do   ⌘⌫ drop   Tab scope   esc close")
             Spacer()
             let open = model.scopedProjects(all: model.allProjects).flatMap(\.tickets).filter { $0.status != "done" }.count
@@ -710,4 +938,75 @@ private struct TicketPanelView: View {
         .padding(.horizontal, 14)
         .frame(height: 26)
     }
+}
+
+/// TicketDeck's daily report (~/.ticketdeck/reports/<date>.json).
+struct DailyReport: Decodable {
+    struct Totals: Decodable { let open, review, doing, todo, decisions, done, stale, projects: Int }
+    struct Item: Decodable {
+        let project, root, id, title, priority, updated: String
+        let session: String?
+        let stale: Bool?
+        var key: String { root + "#" + id }
+    }
+    struct Activity: Decodable { let project, root: String; let created, done, updated: Int }
+    struct Leftover: Decodable { let project, task: String; let session: String? }
+    struct Focus: Decodable {
+        let project, root, id, title, priority, kind: String
+        let session: String?
+        let idleDays: Int
+        let reason: String?
+    }
+
+    let date, generatedAt: String
+    let totals: Totals
+    let summary: String?
+    let review, decisions, doing, priorities: [Item]
+    let activity: [Activity]
+    let leftovers: [Leftover]?
+    let focusList: [Focus]?
+    var focus: [Focus] { focusList ?? [] }
+
+    enum CodingKeys: String, CodingKey {
+        case date, generatedAt, totals, summary, review, decisions, doing, priorities, activity, leftovers
+        case focusList = "focus"
+    }
+
+    static var today: String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
+    }
+
+    var statusLine: String {
+        let parts = [totals.done > 0 ? "昨日完成 \(totals.done) 项" : nil,
+                     totals.review > 0 ? "\(totals.review) 项待验收" : nil,
+                     totals.stale > 0 ? "\(totals.stale) 项停滞" : nil].compactMap { $0 }
+        return parts.isEmpty ? "\(totals.open) 项任务进行中" : parts.joined(separator: " · ")
+    }
+
+    var dayTitle: String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        guard let d = f.date(from: date) else { return date }
+        let c = Calendar.current.dateComponents([.month, .day, .weekday], from: d)
+        let week = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][(c.weekday ?? 1) - 1]
+        return "\(c.month ?? 0) 月 \(c.day ?? 0) 日 · \(week)"
+    }
+
+    var generatedTime: String {
+        guard let d = ISO8601DateFormatter.withFraction.date(from: generatedAt) ?? ISO8601DateFormatter().date(from: generatedAt)
+        else { return "" }
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f.string(from: d)
+    }
+}
+
+private extension ISO8601DateFormatter {
+    static let withFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 }
