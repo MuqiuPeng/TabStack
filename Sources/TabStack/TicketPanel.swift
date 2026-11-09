@@ -7,8 +7,8 @@ import SwiftUI
 /// to ~/.ticketdeck/cli.json, so there is one implementation of the format.
 ///
 /// ↩ jumps to the ticket's Claude session (switching to the project's workspace first),
-/// ⌘D marks a ticket done, ⌘R sends it back to todo, Tab switches between this workspace and
-/// all projects.
+/// ⌘D marks a ticket done, ⌘R sends it back to todo, ⌘⌫ drops it, Tab switches between this
+/// workspace and all projects.
 final class TicketPanelController: NSObject, NSWindowDelegate {
     private let manager: WorkspaceManager
     private let model = TicketPanelModel()
@@ -30,6 +30,7 @@ final class TicketPanelController: NSObject, NSWindowDelegate {
         model.scopeFolders = ClaudeSessions.folders(of: manager.currentWorkspace)
         model.workspaceName = manager.currentWorkspace.name
         model.focusToken += 1
+        model.loadReports()
         reload()
 
         let panel = self.panel ?? makePanel()
@@ -53,12 +54,16 @@ final class TicketPanelController: NSObject, NSWindowDelegate {
                 let cmd = e.modifierFlags.contains(.command)
                 switch e.keyCode {
                 case 53: self.close(); return nil                         // esc
-                case 36, 76: self.jump(); return nil                      // return
+                case 36, 76 where !self.model.showReport: self.jump(); return nil // return
                 case 125: self.model.move(1); return nil                  // down
                 case 126: self.model.move(-1); return nil                 // up
-                case 48: self.model.allProjects.toggle(); self.model.clampSelection(); return nil // tab
+                case 48: self.model.cycleView(); return nil               // tab: workspace → all → report
+                case 123 where self.model.showReport: self.model.stepReport(1); return nil  // ← older
+                case 124 where self.model.showReport: self.model.stepReport(-1); return nil // → newer
                 case 2 where cmd: self.setStatus("done"); return nil       // ⌘D
                 case 15 where cmd: self.setStatus("todo"); return nil      // ⌘R
+                // ⌘⌫ also clears the search line, so it drops only while the search is empty.
+                case 51 where cmd && self.model.query.isEmpty: self.setStatus("dropped"); return nil
                 default: return e
                 }
             }
@@ -308,6 +313,43 @@ final class TicketPanelModel: ObservableObject {
     @Published var projects: [TicketProject] = []
     @Published var query = ""
     @Published var allProjects = false
+    /// The daily report instead of the ticket list (TicketDeck writes one each morning).
+    @Published var showReport = false
+    @Published var reportDates: [String] = []
+    @Published var reportIndex = 0
+    @Published var reportText: String?
+
+    static var reportsDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ticketdeck/reports")
+    }
+
+    func cycleView() {
+        if showReport { showReport = false; allProjects = false }
+        else if allProjects { showReport = true; loadReports() }
+        else { allProjects = true }
+        clampSelection()
+    }
+
+    /// Newest first; keeps the date shown if it still exists.
+    func loadReports() {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: Self.reportsDir.path)) ?? []
+        let shown = reportDates.indices.contains(reportIndex) ? reportDates[reportIndex] : nil
+        reportDates = names.filter { $0.range(of: #"^\d{4}-\d{2}-\d{2}\.md$"#, options: .regularExpression) != nil }
+            .map { String($0.prefix(10)) }.sorted(by: >)
+        reportIndex = shown.flatMap { reportDates.firstIndex(of: $0) } ?? 0
+        readReport()
+    }
+
+    func stepReport(_ d: Int) {
+        guard !reportDates.isEmpty else { return }
+        reportIndex = min(max(reportIndex + d, 0), reportDates.count - 1)
+        readReport()
+    }
+
+    private func readReport() {
+        guard reportDates.indices.contains(reportIndex) else { reportText = nil; return }
+        reportText = try? String(contentsOf: Self.reportsDir.appendingPathComponent("\(reportDates[reportIndex]).md"), encoding: .utf8)
+    }
     @Published var selectedKey: String?
     @Published var error: String?
     @Published var focusToken = 0
@@ -372,6 +414,8 @@ private struct TicketPanelView: View {
             Divider()
             if let error = model.error {
                 Text(error).foregroundColor(.secondary).padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.showReport {
+                report
             } else {
                 HStack(spacing: 0) {
                     list.frame(width: 340)
@@ -398,14 +442,20 @@ private struct TicketPanelView: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 18))
                 .focused($focused)
-            Picker("", selection: $model.allProjects) {
-                Text(model.workspaceName.isEmpty ? "This workspace" : model.workspaceName).tag(false)
-                Text("All projects").tag(true)
+            Picker("", selection: Binding(
+                get: { model.showReport ? 2 : model.allProjects ? 1 : 0 },
+                set: { v in
+                    model.showReport = v == 2
+                    if v < 2 { model.allProjects = v == 1 } else { model.loadReports() }
+                    model.clampSelection()
+                })) {
+                Text(model.workspaceName.isEmpty ? "This workspace" : model.workspaceName).tag(0)
+                Text("All projects").tag(1)
+                Text("Report").tag(2)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 200)
-            .onChange(of: model.allProjects) { _ in model.clampSelection() }
+            .frame(width: 290)
         }
         .padding(.horizontal, 16)
         .frame(height: 50)
@@ -516,6 +566,7 @@ private struct TicketPanelView: View {
             if t.status != "todo" {
                 Button("Back to to do ⌘R") { onStatus("todo") }
             }
+            Button("Drop ⌘⌫") { onStatus("dropped") }
             Spacer()
             if let s = t.session {
                 Text(s.hasPrefix("local_") ? String(s.prefix(14)) : s).font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
@@ -594,9 +645,62 @@ private struct TicketPanelView: View {
         }
     }
 
+    /// The daily report, drawn from its markdown line by line (headings, notes, bullets, table).
+    @ViewBuilder private var report: some View {
+        if let text = model.reportText {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(model.reportDates[model.reportIndex]).font(.system(size: 11, design: .monospaced)).foregroundColor(.secondary)
+                        Spacer()
+                        Text("\(model.reportIndex + 1) of \(model.reportDates.count)").font(.system(size: 10)).foregroundColor(.secondary)
+                    }
+                    ForEach(Array(text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, sub in
+                        reportLine(String(sub))
+                    }
+                }
+                .padding(.horizontal, 22).padding(.vertical, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        } else {
+            Text("No report yet. TicketDeck writes one every morning at 8:00\n(or run `ticketdeck report --save`).")
+                .multilineTextAlignment(.center).foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder private func reportLine(_ line: String) -> some View {
+        let s = line.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("# ") {
+            Text(s.dropFirst(2)).font(.system(size: 17, weight: .semibold)).padding(.top, 2)
+        } else if s.hasPrefix("## ") {
+            Text(s.dropFirst(3)).font(.system(size: 13, weight: .semibold)).padding(.top, 10)
+        } else if s.hasPrefix("|") {
+            if !s.contains("---") {
+                let cells = s.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+                HStack(spacing: 0) {
+                    ForEach(Array(cells.enumerated()), id: \.offset) { i, c in
+                        Text(c).font(.system(size: 11.5, weight: cells.first == "Project" ? .semibold : .regular))
+                            .frame(width: i == 0 ? 220 : 64, alignment: i == 0 ? .leading : .trailing)
+                    }
+                }
+            }
+        } else if s.hasPrefix("- ") {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("•").foregroundColor(.secondary)
+                Text(inline(String(s.dropFirst(2)))).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+            }
+        } else if s.hasPrefix("_") && s.hasSuffix("_") {
+            Text(s.dropFirst().dropLast()).font(.system(size: 11)).foregroundColor(.secondary)
+        } else if !s.isEmpty {
+            Text(inline(s)).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+        }
+    }
+
     private var footer: some View {
         HStack {
-            Text("↑↓ select   ↩ open session   ⌘D done   ⌘R to do   Tab scope   esc close")
+            Text(model.showReport ? "←→ older / newer   Tab tickets   esc close"
+                                  : "↑↓ select   ↩ open session   ⌘D done   ⌘R to do   ⌘⌫ drop   Tab scope   esc close")
             Spacer()
             let open = model.scopedProjects(all: model.allProjects).flatMap(\.tickets).filter { $0.status != "done" }.count
             Text("\(open) open")

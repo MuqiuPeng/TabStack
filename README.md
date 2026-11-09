@@ -70,7 +70,7 @@ the top of the sidebar.
 | Search workspaces | `⌃⌥F` — type a name or window title, `↑↓` to select, `↩` to open. With no query it lists by recommendation, collapsed workspaces included |
 | Close window | `⌃⌥D` — closes the current window, removes it from the list and moves to the neighbouring one |
 | Add to workspace | `⌃⌥A` — the window you are using comes first (`⌃⌥A` `↩` adds it); also other open windows, new Finder / terminal / browser windows, and installed apps by name |
-| TicketDeck tickets | `⌃⌥T` — the [TicketDeck](https://github.com/MuqiuPeng/TicketDeck) tickets of the current workspace's projects (`Tab` for all projects): `↩` jumps to the ticket's Claude session, `⌘D` marks it done, `⌘R` sends it back to todo, checklist items can be ticked. Needs `ticketdeck setup` |
+| TicketDeck tickets | `⌃⌥T` — the [TicketDeck](https://github.com/MuqiuPeng/TicketDeck) tickets of the current workspace's projects (`Tab` cycles this workspace → all projects → the daily report): `↩` jumps to the ticket's Claude session, `⌘D` marks it done, `⌘R` sends it back to todo, `⌘⌫` drops it, checklist items can be ticked. Needs `ticketdeck setup` |
 | Previous / next tab | `⌃⌥↑` / `⌃⌥↓` (cycles within the workspace) |
 | Previous / next workspace | `⌃⌥←` / `⌃⌥→` (cycles) |
 | Show / hide sidebar | `⌥⌘0` (the current app fills the screen once hidden) |
