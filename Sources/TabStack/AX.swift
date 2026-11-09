@@ -4,6 +4,15 @@ import ApplicationServices
 @_silgen_name("_AXUIElementGetWindow")
 private func _AXUIElementGetWindow(_ element: AXUIElement, _ id: inout CGWindowID) -> AXError
 
+@_silgen_name("_AXUIElementCreateWithRemoteToken")
+private func _AXUIElementCreateWithRemoteToken(_ token: CFData) -> Unmanaged<AXUIElement>?
+
+@_silgen_name("CGSMainConnectionID")
+private func CGSMainConnectionID() -> Int32
+
+@_silgen_name("CGSCopySpacesForWindows")
+private func CGSCopySpacesForWindows(_ cid: Int32, _ mask: Int32, _ windows: CFArray) -> Unmanaged<CFArray>?
+
 /// Thin wrapper over the Accessibility API used to move, resize and raise
 /// windows that belong to other applications.
 enum AX {
@@ -74,6 +83,138 @@ enum AX {
         let app = AXUIElementCreateApplication(pid)
         let all: [AXUIElement] = attr(app, kAXWindowsAttribute) ?? []
         return all.filter(isStandard)
+    }
+
+    /// Like `windows(pid:)`, but also finds the windows that the AXWindows attribute leaves
+    /// out: a hidden app reports none there, so do apps whose windows sit on another Space.
+    /// When WindowServer knows of more windows than AXWindows returns, the app's AX elements
+    /// are looked up by id through a remote token (the lookup AltTab uses), with a time budget.
+    ///
+    /// The scan is remembered per process, so repeated calls stay cheap: windows it found are
+    /// reused while they exist, a scan cut short by the budget resumes where it stopped, and
+    /// ids a full scan could not find (some apps keep windows with no AX element) are not
+    /// searched for again until a window id appears that has not been looked for yet.
+    static func windowsIncludingHidden(pid: pid_t) -> [AXUIElement] {
+        var result = windows(pid: pid)
+        var seen = Set(result.compactMap(windowID))
+        let expected = serverWindowIDs(pid: pid)
+
+        hiddenScanLock.lock()
+        defer { hiddenScanLock.unlock() }
+        hiddenScans = hiddenScans.filter { $0.key == pid || NSRunningApplication(processIdentifier: $0.key) != nil }
+        var scan = hiddenScans[pid] ?? HiddenScan()
+        defer { hiddenScans[pid] = scan }
+        // Forget windows that closed, and those AXWindows reports again (the app was shown).
+        scan.found = scan.found.filter { expected.contains($0.key) && !seen.contains($0.key) }
+        scan.unresolved.formIntersection(expected.subtracting(seen))
+
+        for (id, w) in scan.found where windowID(w) == id {
+            seen.insert(id)
+            result.append(w)
+        }
+        let missing = expected.subtracting(seen).subtracting(scan.unresolved)
+        guard !missing.isEmpty else { return result }
+
+        var token = Data(count: 20)
+        token.replaceSubrange(0..<4, with: withUnsafeBytes(of: pid) { Data($0) })
+        token.replaceSubrange(8..<12, with: withUnsafeBytes(of: UInt32(0x636f_636f)) { Data($0) })
+        let deadline = Date().addingTimeInterval(0.1)
+        var elementID = scan.resumeAt
+        while elementID < hiddenScanLimit, !missing.isSubset(of: seen) {
+            if Date() > deadline {
+                scan.resumeAt = elementID
+                return result
+            }
+            token.replaceSubrange(12..<20, with: withUnsafeBytes(of: elementID) { Data($0) })
+            elementID += 1
+            guard let w = _AXUIElementCreateWithRemoteToken(token as CFData)?.takeRetainedValue(),
+                  isStandardEvenIfHidden(w), let id = windowID(w), !seen.contains(id) else { continue }
+            seen.insert(id)
+            scan.found[id] = w
+            result.append(w)
+        }
+        // The scan got through: what it did not find has no element in the searched range.
+        scan.resumeAt = 0
+        scan.unresolved.formUnion(missing.subtracting(seen))
+        return result
+    }
+
+    private struct HiddenScan {
+        var found: [CGWindowID: AXUIElement] = [:]
+        var unresolved: Set<CGWindowID> = []
+        var resumeAt: UInt64 = 0
+    }
+    private static let hiddenScanLimit: UInt64 = 2000
+    private static var hiddenScans: [pid_t: HiddenScan] = [:]
+    private static let hiddenScanLock = NSLock()
+
+    /// While its app is hidden, a document window reports the AXDialog subrole. It keeps
+    /// its minimize and zoom buttons though, which a real dialog does not have.
+    private static func isStandardEvenIfHidden(_ w: AXUIElement) -> Bool {
+        switch attr(w, kAXSubroleAttribute) as String? {
+        case kAXStandardWindowSubrole?: return true
+        case kAXDialogSubrole?:
+            return (attr(w, kAXMinimizeButtonAttribute) as AXUIElement?) != nil
+                && (attr(w, kAXZoomButtonAttribute) as AXUIElement?) != nil
+        default: return false
+        }
+    }
+
+    /// A window as listed to the user: its WindowServer id and title, and its AX element
+    /// when one could be found.
+    struct ListedWindow {
+        let id: CGWindowID
+        let title: String
+        let element: AXUIElement?
+    }
+
+    /// The app's windows for listing and adopting: everything `windowsIncludingHidden` finds,
+    /// plus, while the app is hidden, the windows it has no AX element for at all. Some apps
+    /// (WeChat) tear down the accessibility element of a window when hidden, so neither
+    /// AXWindows nor the remote-token lookup can reach it; WindowServer still knows it, and a
+    /// tab only needs its id and title. Only windows that still belong to a Space are taken
+    /// from there: an app's ordered-out windows (prebuilt dialogs, login panels) belong to none.
+    static func listedWindows(of app: NSRunningApplication) -> [ListedWindow] {
+        let pid = app.processIdentifier
+        var result = windowsIncludingHidden(pid: pid).compactMap { w in
+            windowID(w).map { ListedWindow(id: $0, title: title(w), element: w) }
+        }
+        guard app.isHidden else { return result }
+        let known = Set(result.map(\.id))
+        for (id, name) in serverWindows(pid: pid) where !known.contains(id) && isOnSpace(id) {
+            // Without screen recording permission WindowServer withholds window titles;
+            // the app's name is the best stand-in (these are typically its main window).
+            let title = (name?.isEmpty == false ? name : nil) ?? app.localizedName ?? ""
+            result.append(ListedWindow(id: id, title: title, element: nil))
+        }
+        return result
+    }
+
+    private static func isOnSpace(_ id: CGWindowID) -> Bool {
+        let spaces = CGSCopySpacesForWindows(CGSMainConnectionID(), 0x7, [id] as CFArray)?
+            .takeRetainedValue() as? [Any]
+        return !(spaces ?? []).isEmpty
+    }
+
+    /// WindowServer ids of an app's normal-layer windows, on screen or not. Strips no taller
+    /// than the menu bar (apps keep a few per display) are left out: they are never windows.
+    private static func serverWindowIDs(pid: pid_t) -> Set<CGWindowID> {
+        Set(serverWindows(pid: pid).map(\.id))
+    }
+
+    /// The same windows with their WindowServer titles, front to back (a title is nil
+    /// without the screen recording permission).
+    private static func serverWindows(pid: pid_t) -> [(id: CGWindowID, title: String?)] {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { return [] }
+        return list.compactMap { info in
+            guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
+                  (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let b = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: b), rect.height > 60,
+                  let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value else { return nil }
+            return (id, info[kCGWindowName as String] as? String)
+        }
     }
 
     static func title(_ w: AXUIElement) -> String {

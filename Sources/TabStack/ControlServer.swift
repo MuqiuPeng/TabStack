@@ -207,7 +207,14 @@ final class ControlCommands {
         m.bindUnboundTabs()
         let filter = (p["app"] as? String)?.lowercased()
         var owners: [CGWindowID: [String]] = [:]
-        for ws in m.workspaces { for t in ws.tabs { if let w = t.windowID { owners[w, default: []].append(ws.name) } } }
+        var knownTitles: [CGWindowID: String] = [:]
+        for ws in m.workspaces {
+            for t in ws.tabs {
+                guard let w = t.windowID else { continue }
+                owners[w, default: []].append(ws.name)
+                if let title = t.title, !title.isEmpty { knownTitles[w] = title }
+            }
+        }
         return NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
             .filter { app in
@@ -216,12 +223,14 @@ final class ControlCommands {
                     || (app.bundleIdentifier ?? "").lowercased().contains(filter)
             }
             .compactMap { app -> [String: Any]? in
-                let windows: [[String: Any]] = AX.windows(pid: app.processIdentifier).compactMap { w in
-                    guard let id = AX.windowID(w) else { return nil }
-                    var d: [String: Any] = ["windowID": Int(id), "title": AX.title(w)]
-                    if let ws = owners[id] { d["inWorkspaces"] = ws }
+                let windows: [[String: Any]] = AX.listedWindows(of: app).map { w in
+                    // A window found only through WindowServer may carry just the app's name
+                    // as its title; a tab holding it remembers the real one.
+                    let title = w.element == nil ? knownTitles[w.id] ?? w.title : w.title
+                    var d: [String: Any] = ["windowID": Int(w.id), "title": title]
+                    if let ws = owners[w.id] { d["inWorkspaces"] = ws }
                     if AppKind.of(app.bundleIdentifier ?? "") == .editor,
-                       let root = Restore.editorRootName(fromTitle: AX.title(w)) { d["folderName"] = root }
+                       let root = Restore.editorRootName(fromTitle: title) { d["folderName"] = root }
                     return d
                 }
                 guard !windows.isEmpty else { return nil }
@@ -293,9 +302,10 @@ final class ControlCommands {
         guard let raw = p["windowID"] as? Int else { throw Failure("missing windowID (from list_windows)") }
         let id = CGWindowID(raw)
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
-            if let w = AX.windows(pid: app.processIdentifier).first(where: { AX.windowID($0) == id }) {
+            if let w = AX.listedWindows(of: app).first(where: { $0.id == id }) {
                 if let existing = ws.tabs.first(where: { $0.windowID == id }) { return describe(existing) }
-                m.addWindow(id, title: AX.title(w), of: app, to: ws.id)
+                let known = w.element == nil ? m.allTabs.first(where: { $0.windowID == id && $0.title?.isEmpty == false })?.title : nil
+                m.addWindow(id, title: known ?? w.title, of: app, to: ws.id)
                 guard let t = m.workspaces.first(where: { $0.id == ws.id })?.tabs.first(where: { $0.windowID == id })
                 else { throw Failure("could not add the window") }
                 if let name = p["name"] as? String, !name.isEmpty { m.renameTab(t.id, to: name) }
@@ -441,12 +451,18 @@ final class ControlCommands {
 
     private func removeTab(_ p: [String: Any]) throws -> [String: Any] {
         let (t, ws) = try tab(p)
-        if p["closeWindow"] as? Bool == true, let id = t.windowID, let app = m.runningApp(t.bundleID),
-           let w = AX.windows(pid: app.processIdentifier).first(where: { AX.windowID($0) == id }) {
-            AX.close(w)
+        var closed: Bool?
+        if p["closeWindow"] as? Bool == true {
+            closed = false
+            if let id = t.windowID, let app = m.runningApp(t.bundleID),
+               let w = AX.windowsIncludingHidden(pid: app.processIdentifier).first(where: { AX.windowID($0) == id }) {
+                closed = AX.close(w)
+            }
         }
         m.removeTab(t.id, from: ws.id)
-        return ["removed": t.displayName, "workspace": ws.name]
+        var result: [String: Any] = ["removed": t.displayName, "workspace": ws.name]
+        if let closed { result["windowClosed"] = closed }
+        return result
     }
 
     @discardableResult
