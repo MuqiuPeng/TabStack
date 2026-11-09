@@ -9,6 +9,7 @@ import Carbon
 ///   ⌃⌥F         search workspaces (also the ones the sidebar does not show)
 ///   ⌃⌥D         close the focused window and remove its tab
 ///   ⌃⌥A         add a window or app to the current workspace
+///   ⌃⌥T         TicketDeck tickets of the current workspace's projects
 /// ⌘1–9 alone is avoided because browsers and editors use it for their own tabs, and
 /// ⌘-arrows because they are the system-wide text navigation keys.
 enum HotKeys {
@@ -21,6 +22,7 @@ enum HotKeys {
         case search
         case closeWindow
         case quickAdd
+        case tickets
     }
 
     static var handler: ((Action) -> Void)?
@@ -29,7 +31,7 @@ enum HotKeys {
     private static let digits = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5,
                                  kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9]
 
-    // Hotkey ids: 1–9 tabs, 101–109 workspaces, 200 toggle, 301–304 arrows, 401 search, 402 close, 403 add.
+    // Hotkey ids: 1–9 tabs, 101–109 workspaces, 200 toggle, 301–304 arrows, 401 search, 402 close, 403 add, 404 tickets.
     private static func action(for id: UInt32) -> Action? {
         switch id {
         case 1...9: return .tab(Int(id) - 1)
@@ -42,6 +44,7 @@ enum HotKeys {
         case 401: return .search
         case 402: return .closeWindow
         case 403: return .quickAdd
+        case 404: return .tickets
         default: return nil
         }
     }
@@ -70,6 +73,7 @@ enum HotKeys {
         add(key: kVK_ANSI_F, modifiers: arrows, id: 401)
         add(key: kVK_ANSI_D, modifiers: arrows, id: 402)
         add(key: kVK_ANSI_A, modifiers: arrows, id: 403)
+        add(key: kVK_ANSI_T, modifiers: arrows, id: 404)
     }
 
     private static func add(key: Int, modifiers: Int, id: UInt32) {
