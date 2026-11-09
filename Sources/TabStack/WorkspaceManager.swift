@@ -203,11 +203,13 @@ final class WorkspaceManager: ObservableObject {
         refreshRunning()
         refreshLiveWindows()
         observeWorkspace()
-        watcher.onFocusChange = { [weak self] pid in self?.handleFocus(pid: pid) }
+        watcher.onFocusChange = { [weak self] pid in self?.handleFocus(pid: pid, activation: false) }
         watcher.onWindowClosed = { [weak self] in
+            self?.noteFocusHandoff()
             // Let the app settle (and AX forget the window) before looking.
             self?.after(0.15) { self?.coverClosedWindow() }
         }
+        watcher.onWindowMinimized = { [weak self] in self?.noteFocusHandoff() }
         syncWatcher()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.tick() }
         tick()
@@ -370,6 +372,7 @@ final class WorkspaceManager: ObservableObject {
     /// motion: the apps of the workspace being left.
     func select(_ tab: AppTab, alsoHide: [String] = []) {
         currentID = primary(of: tab).id
+        focusOutside = false
         updateCurrent { $0.lastTabID = tab.id } // which half of a pair had focus
         guard AX.isTrusted else { AX.requestTrust(); return }
 
@@ -534,14 +537,23 @@ final class WorkspaceManager: ObservableObject {
 
     /// Windows that some tab (in any workspace) is bound to.
     func claimedWindowIDs(except tabID: UUID? = nil) -> Set<CGWindowID> {
-        // Claude's one window is shared: each workspace's Claude tab shows it on its own session.
-        // Shared tabs of one app don't take a window away from each other either.
+        // Single-window apps (Claude, Codex) are shared: every workspace's tab shows the one
+        // window. Shared tabs of one app don't take a window away from each other either,
+        // nor do tabs that held the same window (they move to the new one together).
         let me = tabID.flatMap { id in allTabs.first { $0.id == id } }
         return Set(allTabs.filter { t in
-            t.id != tabID && t.bundleID != ClaudeSessions.bundleID
+            t.id != tabID && !Self.singleWindowApps.contains(t.bundleID)
                 && !(me?.shared == true && t.shared == true && t.bundleID == me?.bundleID)
+                && !(me?.windowID != nil && t.windowID == me?.windowID)
         }.compactMap(\.windowID))
     }
+
+    /// Apps used through one main window, which every workspace may hold as a tab.
+    static let singleWindowApps: Set<String> = [
+        ClaudeSessions.bundleID,
+        "com.openai.codex", // ChatGPT / Codex
+        "com.openai.chat",  // older ChatGPT builds
+    ]
 
     func isBound(_ tab: AppTab) -> Bool {
         tab.windowID.map { isLive($0, of: tab.bundleID) } ?? false
@@ -773,12 +785,21 @@ final class WorkspaceManager: ObservableObject {
     }
 
     private func bind(_ tabID: UUID, to windowID: CGWindowID, title: String) {
-        updateTab(tabID) {
-            $0.windowID = windowID
-            $0.title = title
+        // Tabs in other workspaces that held the same, now gone window (it got a new id
+        // after a restart) follow it to the new one.
+        let me = allTabs.first { $0.id == tabID }
+        let old = me?.windowID
+        let followers = old.map { o in
+            o == windowID || isLive(o, of: me?.bundleID ?? "") ? [] : allTabs.filter { $0.id != tabID && $0.windowID == o }.map(\.id)
+        } ?? []
+        for id in [tabID] + followers {
+            updateTab(id) {
+                $0.windowID = windowID
+                $0.title = title
+            }
         }
         liveWindowIDs.insert(windowID)
-        if let bundleID = allTabs.first(where: { $0.id == tabID })?.bundleID { windowOwners[windowID] = bundleID }
+        if let bundleID = me?.bundleID { windowOwners[windowID] = bundleID }
     }
 
     // MARK: Reopen recipes
@@ -1363,46 +1384,103 @@ final class WorkspaceManager: ObservableObject {
         }
         after(2) { [weak self] in self?.snapshotBrowsers() }
         nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.noteFocusHandoff()
             self?.refreshRunning()
             self?.refreshLiveWindows()
             self?.syncWatcher()
+        }
+        nc.addObserver(forName: NSWorkspace.didHideApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.noteFocusHandoff()
         }
         // ⌘Tab / Dock switches arrive as app activations; clicks between windows of the
         // same app arrive through the WindowWatcher. Both end up in handleFocus.
         nc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            self?.handleFocus(pid: app.processIdentifier)
+            self?.handleFocus(pid: app.processIdentifier, activation: true)
         }
     }
 
     /// Keeps the highlight in sync with the focused window and fits that window next to
     /// the sidebar. A focused window that is no tab's yet is taken by an unbound tab of
-    /// the same app.
-    private func handleFocus(pid: pid_t) {
-        if let p = pending {
-            if Date() < p.until { return }
-            pending = nil
+    /// the same app. A window of another workspace switches to that workspace; any other
+    /// window just clears the highlight.
+    /// `activation`: the app as a whole came forward (⌘Tab, Dock), as opposed to a click
+    /// on one of its windows.
+    private func handleFocus(pid: pid_t, activation: Bool) {
+        if let p = pending, Date() < p.until {
+            // Focus changes during a switch are mostly its own side effects. Keep the last
+            // one and look again once the switch is over.
+            pendingEvent = (pid, activation)
+            after(p.until.timeIntervalSinceNow + 0.05) { [weak self] in self?.afterPending() }
+            return
         }
-        guard AX.isTrusted,
+        applyFocus(pid: pid, sideEffects: true, follow: true, activation: activation)
+        // Apps report their new focused window a moment after they activate.
+        after(0.15) { [weak self] in self?.recheckFocus(follow: true, activation: activation) }
+        after(0.5) { [weak self] in self?.recheckFocus(follow: true, activation: activation) }
+    }
+
+    /// The last focus event seen while a switch was in progress.
+    private var pendingEvent: (pid: pid_t, activation: Bool)?
+
+    /// A switch is over. If the last focus change during it went to another app that is
+    /// still in front, the user moved on meanwhile: handle it as a fresh event.
+    private func afterPending() {
+        guard pending.map({ Date() >= $0.until }) ?? true else { return }
+        let target = pending.flatMap { p in allTabs.first { $0.id == p.tabID } }
+        let event = pendingEvent
+        pendingEvent = nil
+        pending = nil
+        if let event, let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier == event.pid,
+           front.bundleIdentifier != target?.bundleID {
+            handleFocus(pid: event.pid, activation: event.activation)
+        } else {
+            recheckFocus()
+        }
+    }
+
+    /// Re-reads the frontmost window and fixes the highlight (no Claude / link handling).
+    /// Only checks right after a focus event may follow the window to its workspace.
+    private func recheckFocus(follow: Bool = false, activation: Bool = false) {
+        if let p = pending, Date() < p.until { return }
+        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        applyFocus(pid: app.processIdentifier, sideEffects: false, follow: follow, activation: activation)
+    }
+
+    /// When focus last moved because a window closed or minimized, or an app hid or quit:
+    /// the window that gets focus then was not chosen, so it must not switch workspaces.
+    private var focusHandoffAt = Date.distantPast
+    private var followToken = 0
+
+    /// Marks the sidebar as not showing the focused window (TabStack's own panels aside).
+    @Published private(set) var focusOutside = false
+
+    private func applyFocus(pid: pid_t, sideEffects: Bool, follow: Bool, activation: Bool) {
+        pending = nil
+        guard AX.isTrusted, pid != ProcessInfo.processInfo.processIdentifier,
               let app = NSRunningApplication(processIdentifier: pid), !app.isHidden,
-              let bundleID = app.bundleIdentifier,
-              let w = AX.focusedWindow(pid: pid), let wid = AX.windowID(w)
-        else { return }
-        // Clicking straight into Claude counts as showing it here.
-        if bundleID == ClaudeSessions.bundleID, claudeVisited != currentWorkspaceID {
-            if let t = tabs.first(where: { $0.bundleID == ClaudeSessions.bundleID }) {
-                syncClaudeSession(showing: t)
-            } else {
-                claudeVisited = currentWorkspaceID
-            }
+              let bundleID = app.bundleIdentifier else { return }
+        guard let w = AX.focusedWindow(pid: pid), let wid = AX.windowID(w) else {
+            // An app in front without a window (Finder on the desktop): nothing here has focus.
+            if !focusOutside, !tabs.contains(where: { $0.bundleID == bundleID }) { focusOutside = true }
+            return
         }
-        if AppKind.of(bundleID) == .browser, !tabs.contains(where: { $0.windowID == wid }) { catchLink(bundleID) }
+        if sideEffects {
+            // Clicking straight into Claude counts as showing it here.
+            if bundleID == ClaudeSessions.bundleID, claudeVisited != currentWorkspaceID {
+                if let t = tabs.first(where: { $0.bundleID == ClaudeSessions.bundleID }) {
+                    syncClaudeSession(showing: t)
+                } else {
+                    claudeVisited = currentWorkspaceID
+                }
+            }
+            if AppKind.of(bundleID) == .browser, !tabs.contains(where: { $0.windowID == wid }) { catchLink(bundleID) }
+        }
         // Working in a window on another display moves the focus (hotkeys, menus) there.
         if let d = display(ofWindow: wid, w) { focusDisplay(d) }
-        guard tabs.contains(where: { $0.bundleID == bundleID }) else { return }
-        refreshLiveWindows()
 
         if let tab = tabs.first(where: { $0.windowID == wid }) {
+            if focusOutside { focusOutside = false }
             let rep = primary(of: tab)
             guard currentID != rep.id else {
                 // Focus moved within the pair: just remember the side.
@@ -1412,15 +1490,57 @@ final class WorkspaceManager: ObservableObject {
             currentID = rep.id
             updateCurrent { $0.lastTabID = tab.id }
             place(tab)
-        } else if let tab = tabs.first(where: { $0.bundleID == bundleID && !isBound($0)
+            return
+        }
+        refreshLiveWindows()
+        if let tab = tabs.first(where: { $0.bundleID == bundleID && !isBound($0)
                     && (!isRestorable($0) || match($0, among: [w]) != nil) }),
-                  !claimedWindowIDs(except: tab.id).contains(wid) {
+           !claimedWindowIDs(except: tab.id).contains(wid) {
+            focusOutside = false
             bind(tab.id, to: wid, title: AX.title(w))
             currentID = primary(of: tab).id
             updateCurrent { $0.lastTabID = tab.id }
             place(tab)
+            return
+        }
+        // ⌘Tab / Dock to an app brings its last used window, maybe another workspace's.
+        // If this workspace has a window of the app, show that one instead.
+        if activation {
+            let mine = tabs.filter { $0.bundleID == bundleID && isBound($0) }
+            if let tab = mine.first(where: { $0.id == currentWorkspace.lastTabID }) ?? mine.first {
+                select(tab)
+                return
+            }
+        }
+        if !focusOutside { focusOutside = true }
+        if follow { followFocus(to: wid, pid: pid) }
+    }
+
+    /// The focused window is a tab of exactly one other workspace (not shown on another
+    /// display): switch there, once focus has stayed on it for a moment and was not just
+    /// handed over by a closing window, a hidden app or a caught link.
+    private func followFocus(to wid: CGWindowID, pid: pid_t) {
+        let elsewhere = Set(otherDisplays.values.map(\.workspace))
+        let owners = workspaces.filter { ws in
+            ws.id != currentWorkspaceID && !elsewhere.contains(ws.id) && ws.tabs.contains { $0.windowID == wid }
+        }
+        guard owners.count == 1, let ws = owners.first,
+              let tab = ws.tabs.first(where: { $0.windowID == wid }) else { return }
+        followToken += 1
+        let token = followToken
+        after(0.4) { [weak self] in
+            guard let self, token == self.followToken, self.pending == nil, !self.movingLink,
+                  Date().timeIntervalSince(self.focusHandoffAt) > 1,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                  let w = AX.focusedWindow(pid: pid), AX.windowID(w) == wid,
+                  !self.tabs.contains(where: { $0.windowID == wid }),
+                  self.workspaces.contains(where: { $0.id == ws.id }) else { return }
+            self.switchWorkspace(ws.id, to: tab.id)
         }
     }
+
+    /// Something other than the user is about to move focus (see `focusHandoffAt`).
+    func noteFocusHandoff() { focusHandoffAt = Date() }
 
     /// Focus is watched for every running app that backs a tab in any workspace.
     func syncWatcher() {
@@ -1475,6 +1595,7 @@ final class WorkspaceManager: ObservableObject {
         sweepRestoredTerminals()
         bindUnboundTabs()
         refreshTitles()
+        recheckFocus()
         if tickCount % 5 == 1 { captureRecipes() }
         let b = AX.dockBadges()
         if b != badges { badges = b }
@@ -1698,7 +1819,7 @@ final class WorkspaceManager: ObservableObject {
     }
 
     func selectedTabID(on display: DisplayKey) -> UUID? {
-        display == focusedDisplay ? currentID : otherDisplays[display]?.tab
+        display == focusedDisplay ? (focusOutside ? nil : currentID) : otherDisplays[display]?.tab
     }
 
     func workspace(on display: DisplayKey) -> Workspace? {

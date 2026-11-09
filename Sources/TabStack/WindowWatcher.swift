@@ -9,6 +9,8 @@ final class WindowWatcher {
     var onFocusChange: ((pid_t) -> Void)?
     /// Called on the main thread when a window passed to `watchClose` goes away.
     var onWindowClosed: (() -> Void)?
+    /// Called on the main thread when a window of a watched app is minimized.
+    var onWindowMinimized: (() -> Void)?
 
     private var observers: [pid_t: AXObserver] = [:]
 
@@ -25,6 +27,7 @@ final class WindowWatcher {
             let app = AXUIElementCreateApplication(pid)
             let refcon = Unmanaged.passUnretained(self).toOpaque()
             AXObserverAddNotification(observer, app, kAXFocusedWindowChangedNotification as CFString, refcon)
+            AXObserverAddNotification(observer, app, kAXWindowMiniaturizedNotification as CFString, refcon)
             CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
             observers[pid] = observer
         }
@@ -39,6 +42,7 @@ final class WindowWatcher {
     }
 
     fileprivate func closed() { onWindowClosed?() }
+    fileprivate func minimized() { onWindowMinimized?() }
 
     fileprivate func fire(_ element: AXUIElement) {
         var pid: pid_t = 0
@@ -53,6 +57,8 @@ private func windowWatcherCallback(_ observer: AXObserver, _ element: AXUIElemen
     let watcher = Unmanaged<WindowWatcher>.fromOpaque(refcon).takeUnretainedValue()
     if CFEqual(notification, kAXUIElementDestroyedNotification as CFString) {
         watcher.closed()
+    } else if CFEqual(notification, kAXWindowMiniaturizedNotification as CFString) {
+        watcher.minimized()
     } else {
         watcher.fire(element)
     }

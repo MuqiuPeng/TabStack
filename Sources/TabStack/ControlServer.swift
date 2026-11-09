@@ -180,6 +180,8 @@ final class ControlCommands {
         ]
         if let c = ws.color { d["color"] = c }
         if let s = ws.claudeSession { d["claudeSession"] = s }
+        // The highlighted tab (none while focus is on a window outside the workspace).
+        if ws.id == m.currentWorkspaceID, let t = m.selectedTabID(on: m.focusedDisplay) { d["selectedTab"] = t.uuidString }
         if let i = m.activeWorkspaces.firstIndex(of: ws), i < 9 { d["hotkey"] = "⌃⌥\(i + 1)" }
         return d
     }
