@@ -110,6 +110,20 @@ enum ClaudeSessions {
         return matching(ws, in: sessions).first
     }
 
+    /// Opens a new Claude Code session in `folder` with `prompt` in its input box; the user
+    /// sends it (Claude never sends a prompt from a link by itself).
+    static func newSession(prompt: String, folder: String) {
+        var c = URLComponents()
+        c.scheme = "claude"
+        c.host = "code"
+        c.path = "/new"
+        c.queryItems = [URLQueryItem(name: "q", value: String(prompt.prefix(14_000))),
+                        URLQueryItem(name: "folder", value: folder),
+                        URLQueryItem(name: "source", value: "url_external")]
+        guard let url = c.url else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     static func open(_ id: String) {
         guard id.range(of: #"^local_[A-Za-z0-9-]{1,64}$"#, options: .regularExpression) != nil,
               let url = URL(string: "claude://code/continue?session=\(id)&source=url_external") else { return }

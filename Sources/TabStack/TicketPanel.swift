@@ -52,7 +52,10 @@ final class TicketPanelController: NSObject, NSWindowDelegate {
 
         // Agents edit tickets while you look; follow along.
         refresh?.invalidate()
-        refresh = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.reload() }
+        refresh = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.reload()
+            if self?.model.showReport == true { self?.model.refreshReport() }
+        }
 
         if keyMonitor == nil {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
@@ -155,6 +158,54 @@ final class TicketPanelController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// 提议执行: "执行" opens a new Claude Code session in the project with the proposal's
+    /// instructions filled in (the user sends them); "忽略" hides it.
+    fileprivate func proposalAction(_ p: DailyReport.Proposal, run: Bool) {
+        guard let date = model.report?.date else { return }
+        model.setProposalState(run ? "started" : "dismissed", for: p, date: date)
+        guard run else { return }
+        let tickets = (p.tickets ?? []).joined(separator: "、")
+        let prompt = "（来自 TicketDeck 今日计划 \(date) 的提议 \(p.id)：\(p.title)\(tickets.isEmpty ? "" : "，涉及 \(tickets)")）\n\n"
+            + Self.fileIntoGroup(p.project) + "\n\n" + p.prompt
+        close()
+        ClaudeSessions.newSession(prompt: prompt, folder: p.root)
+    }
+
+    /// A session opened from a link lands in the sidebar's Ungrouped section; it can file
+    /// itself under the user's group for the project (moving "self" needs no confirmation).
+    static func fileIntoGroup(_ project: String) -> String {
+        "开始前先整理侧边栏：调用 `mcp__ccd_sidebar__list_groups`，如果有名字和项目「\(project)」相同（不区分大小写）的分组，"
+            + "就用 `mcp__ccd_sidebar__move_sessions`（session_ids: [\"self\"]）把这个会话移进去；没有就跳过，不要新建分组。"
+    }
+
+    /// Writes today's 提议执行 now (the 8:00 task does it every morning): runs Claude Code
+    /// headless in the background with read-only tools; the panel picks up the new proposals
+    /// when the report file changes.
+    fileprivate func generateProposals() {
+        guard !model.generating else { return }
+        guard let loc = TicketDeckCLI.location else { model.generateError = "没找到 TicketDeck，先在 TicketDeck 目录运行 ticketdeck setup。"; return }
+        guard let claude = ProposalRunner.claudeBinary else {
+            model.generateError = "没找到 Claude Code 命令行（claude）。安装后再试：https://claude.com/claude-code"
+            return
+        }
+        model.generating = true
+        model.generateError = nil
+        let started = Date()
+        ProposalRunner.run(claude: claude, node: loc.node, cli: loc.cli) { [weak self] result in
+            guard let self else { return }
+            self.model.generating = false
+            switch result {
+            case .success:
+                let file = TicketPanelModel.reportsDir.appendingPathComponent("\(DailyReport.today).json")
+                let changed = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate.map { $0 > started } ?? false
+                if !changed { self.model.generateError = "运行完了，但没有写入提议。" }
+                self.model.loadReports()
+            case .failure(let error):
+                self.model.generateError = error.localizedDescription
+            }
+        }
+    }
+
     /// To the workspace that holds the ticket's project, with Claude on the ticket's session.
     fileprivate func jump() {
         guard let t = model.selected else { NSSound.beep(); return }
@@ -198,7 +249,9 @@ final class TicketPanelController: NSObject, NSWindowDelegate {
                                    onJump: { [weak self] in self?.jump() },
                                    onStatus: { [weak self] s in self?.setStatus(s) },
                                    onCheck: { [weak self] t, i, on in self?.toggleCheck(t, index: i, on: on) },
-                                   onFocus: { [weak self] f in self?.focusAction(f) })
+                                   onFocus: { [weak self] f in self?.focusAction(f) },
+                                   onProposal: { [weak self] p, run in self?.proposalAction(p, run: run) },
+                                   onGenerate: { [weak self] in self?.generateProposals() })
         let hosting = NSHostingView(rootView: view)
         hosting.frame = panel.contentRect(forFrameRect: panel.frame)
         panel.contentView = hosting
@@ -381,11 +434,44 @@ final class TicketPanelModel: ObservableObject {
         guard reportDates.indices.contains(reportIndex),
               let data = try? Data(contentsOf: Self.reportsDir.appendingPathComponent("\(reportDates[reportIndex]).json"))
         else { report = nil; return }
+        reportStamp = (try? Self.reportsDir.appendingPathComponent("\(reportDates[reportIndex]).json")
+            .resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         report = try? JSONDecoder().decode(DailyReport.self, from: data)
         focusIndex = 0
     }
 
     @Published var focusIndex = 0
+
+    /// 生成提议 running in the background, and its last error.
+    @Published var generating = false
+    @Published var generateError: String?
+
+    /// When the shown report file last changed; a newer one (proposals written) is re-read.
+    private var reportStamp: Date?
+
+    func refreshReport() {
+        guard reportDates.indices.contains(reportIndex) else { loadReports(); return }
+        let url = Self.reportsDir.appendingPathComponent("\(reportDates[reportIndex]).json")
+        let stamp = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        guard stamp != reportStamp else { return }
+        let index = focusIndex
+        readReport()
+        focusIndex = index
+    }
+
+    /// What the user did with each proposal ("started" / "dismissed"), by "<date>#<id>".
+    @Published private(set) var proposalStates: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "ticketProposals") as? [String: String] ?? [:]
+
+    func proposalState(_ p: DailyReport.Proposal, date: String) -> String? { proposalStates["\(date)#\(p.id)#\(p.title)"] }
+
+    func setProposalState(_ state: String, for p: DailyReport.Proposal, date: String) {
+        proposalStates["\(date)#\(p.id)#\(p.title)"] = state
+        // Keep a month.
+        let cutoff = Calendar.current.date(byAdding: .day, value: -31, to: Date()).map { DailyReport.dayString($0) } ?? ""
+        proposalStates = proposalStates.filter { $0.key >= cutoff }
+        UserDefaults.standard.set(proposalStates, forKey: "ticketProposals")
+    }
 
     var currentFocus: DailyReport.Focus? {
         guard let f = report?.focus, f.indices.contains(focusIndex) else { return nil }
@@ -465,6 +551,8 @@ private struct TicketPanelView: View {
     let onStatus: (String) -> Void
     let onCheck: (TicketItem, Int, Bool) -> Void
     let onFocus: (DailyReport.Focus) -> Void
+    let onProposal: (DailyReport.Proposal, Bool) -> Void
+    let onGenerate: () -> Void
     @State private var openFolds: Set<String> = []
     @FocusState private var focused: Bool
 
@@ -746,6 +834,7 @@ private struct TicketPanelView: View {
                     VStack(spacing: 6) {
                         ForEach(Array(r.focus.enumerated()), id: \.offset) { n, f in focusRow(f, n) }
                     }
+                    proposals(r)
                     VStack(spacing: 0) {
                         Divider().padding(.top, 14)
                         fold("昨日进展", r.activity.count, .green) {
@@ -787,6 +876,70 @@ private struct TicketPanelView: View {
                 .multilineTextAlignment(.center).foregroundColor(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// 提议执行: tidy-up tasks to hand to a new session; on today's plan, also "生成提议".
+    @ViewBuilder private func proposals(_ r: DailyReport) -> some View {
+        let shown = (r.proposals ?? []).filter { model.proposalState($0, date: r.date) != "dismissed" }
+        let isToday = r.date == DailyReport.today
+        if !shown.isEmpty || isToday {
+            HStack(alignment: .firstTextBaseline) {
+                Text("提议执行").font(.system(size: 11)).foregroundColor(.secondary)
+                if !shown.isEmpty {
+                    Text("同意后开新会话处理，按回车开始").font(.system(size: 10.5)).foregroundColor(.secondary.opacity(0.8))
+                }
+                Spacer()
+                if isToday {
+                    if model.generating {
+                        ProgressView().controlSize(.small)
+                        Text("生成中…").font(.system(size: 11)).foregroundColor(.secondary)
+                    } else {
+                        Button(r.proposals == nil ? "生成提议" : "重新生成") { onGenerate() }
+                            .controlSize(.small)
+                            .help("在后台用 Claude Code 检查所有项目的工单和仓库（只读），把值得清理的任务写进今天的计划，约一两分钟")
+                    }
+                }
+            }
+            .padding(.top, 16).padding(.bottom, 6)
+            if let error = model.generateError, isToday {
+                Text(error).font(.system(size: 11.5)).foregroundColor(.red).fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled).padding(.bottom, 6)
+            }
+            if shown.isEmpty {
+                Text(r.proposals == nil ? "每天早上 8 点会和今日计划一起生成；也可以现在生成。" : "没有需要清理的任务。")
+                    .font(.system(size: 12)).foregroundColor(.secondary)
+            }
+            VStack(spacing: 6) {
+                ForEach(shown, id: \.id) { p in proposalRow(p, date: r.date) }
+            }
+        }
+    }
+
+    private func proposalRow(_ p: DailyReport.Proposal, date: String) -> some View {
+        let started = model.proposalState(p, date: date) == "started"
+        return HStack(spacing: 12) {
+            Image(systemName: started ? "checkmark.circle" : "wand.and.stars")
+                .foregroundColor(started ? .green : .teal).frame(width: 16)
+            VStack(alignment: .leading, spacing: 3) {
+                (Text(p.project + " · ").foregroundColor(.secondary) + Text(p.title))
+                    .font(.system(size: 13)).lineLimit(2)
+                HStack(spacing: 8) {
+                    if started { Text("已开会话").font(.system(size: 10.5, weight: .medium)).foregroundColor(.green) }
+                    if let why = p.why { Text(why).font(.system(size: 11)).lineLimit(1) }
+                    if let t = p.tickets, !t.isEmpty {
+                        Text(t.joined(separator: " ")).font(.system(size: 10.5)).foregroundColor(.secondary)
+                    }
+                }
+            }
+            Spacer(minLength: 6)
+            Button(started ? "再开一次" : "执行") { onProposal(p, true) }.controlSize(.small)
+                .help(p.prompt)
+            if !started { Button("忽略") { onProposal(p, false) }.controlSize(.small) }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.08)))
+        .opacity(started ? 0.65 : 1)
     }
 
     private static let kinds: [String: (String, Color)] = [
@@ -951,6 +1104,11 @@ struct DailyReport: Decodable {
     }
     struct Activity: Decodable { let project, root: String; let created, done, updated: Int }
     struct Leftover: Decodable { let project, task: String; let session: String? }
+    struct Proposal: Decodable {
+        let id, project, root, title, prompt: String
+        let why: String?
+        let tickets: [String]?
+    }
     struct Focus: Decodable {
         let project, root, id, title, priority, kind: String
         let session: String?
@@ -964,18 +1122,21 @@ struct DailyReport: Decodable {
     let review, decisions, doing, priorities: [Item]
     let activity: [Activity]
     let leftovers: [Leftover]?
+    let proposals: [Proposal]?
     let focusList: [Focus]?
     var focus: [Focus] { focusList ?? [] }
 
     enum CodingKeys: String, CodingKey {
-        case date, generatedAt, totals, summary, review, decisions, doing, priorities, activity, leftovers
+        case date, generatedAt, totals, summary, review, decisions, doing, priorities, activity, leftovers, proposals
         case focusList = "focus"
     }
 
-    static var today: String {
+    static var today: String { dayString(Date()) }
+
+    static func dayString(_ d: Date) -> String {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date())
+        return f.string(from: d)
     }
 
     var statusLine: String {
@@ -1009,4 +1170,82 @@ private extension ISO8601DateFormatter {
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
+}
+
+
+/// Runs Claude Code headless to write today's 提议执行, allowed only to read tickets and
+/// repositories and to write the proposals through TicketDeck.
+enum ProposalRunner {
+    struct Failure: LocalizedError { let errorDescription: String? }
+
+    static var claudeBinary: String? {
+        let home = NSHomeDirectory()
+        return [home + "/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude", home + "/.claude/local/claude"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private static let timeout: TimeInterval = 8 * 60
+
+    static func run(claude: String, node: String, cli: String, _ done: @escaping (Result<Void, Error>) -> Void) {
+        let td = "\(node) \(cli)"
+        let prompt = """
+            为今天的 TicketDeck 今日计划生成「提议执行」。这是后台运行，没有人能回答问题，也不要等确认。
+            下面的 `ticketdeck` 一律写成 `\(td)`（原样照抄这条路径，不要加引号）。
+            1. 运行 `ticketdeck reports`；如果最新一份不是今天的，先运行 `ticketdeck report --save`。
+            2. 运行 `ticketdeck report guide`，按它的说明收集信息、挑出值得清理的任务（只读，不改工单和仓库）。
+            3. 写入时不要建文件，用 heredoc 从标准输入传 JSON：
+               \(td) report annotate --proposals @- <<'JSON'
+               [ ... ]
+               JSON
+               没有值得提议的就运行 `\(td) report annotate --no-proposals`。
+            最后用一句中文说写了几条提议。
+            """
+        let allowed = [
+            "Bash(\(td) state:*)", "Bash(\(td) report:*)", "Bash(\(td) reports:*)",
+            "Bash(git -C:*)", "Bash(gh pr list:*)", "Bash(gh pr view:*)", "Read", "Grep", "Glob",
+        ]
+        let projects = NSHomeDirectory() + "/projects"
+        let dir = FileManager.default.fileExists(atPath: projects) ? projects : NSHomeDirectory()
+
+        DispatchQueue.global(qos: .utility).async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: claude)
+            p.arguments = ["-p", prompt, "--allowedTools"] + allowed
+                + ["--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "--max-turns", "60"]
+            p.currentDirectoryURL = URL(fileURLWithPath: dir)
+            var env = ProcessInfo.processInfo.environment
+            // An app started from Finder has a bare PATH; git, gh and node live elsewhere.
+            env["PATH"] = ["/opt/homebrew/bin", "/usr/local/bin", (node as NSString).deletingLastPathComponent,
+                           env["PATH"] ?? "/usr/bin:/bin"].joined(separator: ":")
+            p.environment = env
+            let out = Pipe(), err = Pipe()
+            p.standardOutput = out
+            p.standardError = err
+            p.standardInput = FileHandle.nullDevice
+            do { try p.run() } catch {
+                DispatchQueue.main.async { done(.failure(Failure(errorDescription: "启动 claude 失败：\(error.localizedDescription)"))) }
+                return
+            }
+            let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+            let output = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            let errors = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            p.waitUntilExit()
+            killer.cancel()
+            let result: Result<Void, Error>
+            if p.terminationReason == .uncaughtSignal {
+                result = .failure(Failure(errorDescription: "生成超时（\(Int(timeout / 60)) 分钟），已停止。"))
+            } else if p.terminationStatus != 0 {
+                let text = (errors + "\n" + output).trimmingCharacters(in: .whitespacesAndNewlines)
+                let login = text.contains("authenticate") || text.contains("OAuth") || text.contains("/login")
+                result = .failure(Failure(errorDescription: login
+                    ? "Claude Code 命令行没有登录（或登录已过期）。在终端运行 claude，输入 /login 登录后再试。"
+                    : "生成失败：" + String(text.suffix(300))))
+            } else {
+                debugLog("proposals generated: \(output.trimmingCharacters(in: .whitespacesAndNewlines).suffix(200))")
+                result = .success(())
+            }
+            DispatchQueue.main.async { done(result) }
+        }
+    }
 }
