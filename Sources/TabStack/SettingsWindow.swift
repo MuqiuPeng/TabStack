@@ -317,6 +317,7 @@ private struct GeneralSettings: View {
     @AppStorage("switchAnimation") private var curtain = true
     @AppStorage("restoreOnSwitch") private var restoreOnSwitch = true
     @AppStorage("syncClaudeSession") private var syncClaudeSession = true
+    @AppStorage(SmartLabels.enabledKey) private var smartLabels = true
     @AppStorage("activeWorkspaceLimit") private var limit = 5
     @AppStorage("splitMinWidth") private var splitMinWidth = 2400.0
 
@@ -348,6 +349,17 @@ private struct GeneralSettings: View {
                     get: { splitMinWidth },
                     set: { splitMinWidth = $0; manager.layoutChanged() }), in: 1200...6000, step: 200)
                 Text(widthHint)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Apple 智能") {
+                Toggle("用系统自带模型缩短标签上的窗口标题", isOn: $smartLabels)
+                    .disabled(!SmartLabels.available)
+                    .onChange(of: smartLabels) { _ in manager.refreshLabels() }
+                Text(SmartLabels.available
+                     ? "同一个工作区里有好几个同类窗口时，图标下会显示窗口标题。打开这一项后，太长的标题（比如浏览器网页）会在本机缩成几个字，不联网。鼠标停在标签上仍能看到完整标题；自己改过名字的标签不受影响。"
+                     : "需要 macOS 26 以上，并在系统设置里打开 Apple 智能。现在只会去掉标题里的浏览器名和账户名。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

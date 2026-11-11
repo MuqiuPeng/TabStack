@@ -116,6 +116,11 @@ Other behaviour:
   latest session working in the project's folder is used; right-click the tab
   → **Claude 会话** to pick another.
   Uses Claude's `claude://code/continue` link; turn it off in settings.
+- **Short labels from the on-device model**: when a workspace holds several
+  windows of one app, the label under each icon is its window title. Long titles
+  (web pages, mostly) are shortened to a few words by Apple's on-device model
+  (macOS 26+, Apple Intelligence on; nothing leaves the Mac). Hover for the full
+  title; tabs you renamed keep their name. Turn it off in settings.
 - **Several displays**: each display gets its own sidebar and shows its own
   workspace; two displays never show the same one. Hotkeys and menus act on the
   display you last clicked or worked in. Switching to a workspace another

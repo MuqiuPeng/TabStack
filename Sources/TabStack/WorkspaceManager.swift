@@ -210,6 +210,7 @@ final class WorkspaceManager: ObservableObject {
             self?.after(0.15) { self?.coverClosedWindow() }
         }
         watcher.onWindowMinimized = { [weak self] in self?.noteFocusHandoff() }
+        smartLabels.onChange = { [weak self] in self?.objectWillChange.send() }
         syncWatcher()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.tick() }
         tick()
@@ -1366,9 +1367,15 @@ final class WorkspaceManager: ObservableObject {
     func label(for tab: AppTab) -> String? {
         if let c = tab.customName, !c.isEmpty { return c }
         guard tabs.filter({ $0.bundleID == tab.bundleID }).count > 1 else { return nil }
-        if let t = tab.title, !t.isEmpty { return t }
+        if let t = tab.title, !t.isEmpty { return smartLabels.label(for: t) }
         return tab.name
     }
+
+    /// Short labels for long window titles (on-device model).
+    let smartLabels = SmartLabels()
+
+    /// Redraws labels, e.g. after the smart-label setting changed.
+    func refreshLabels() { objectWillChange.send() }
 
     // MARK: Observation
 
