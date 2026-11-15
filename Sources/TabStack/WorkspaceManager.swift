@@ -984,7 +984,14 @@ final class WorkspaceManager: ObservableObject {
     }
 
     private func reopen(_ app: NSRunningApplication) {
-        guard let url = app.bundleURL else { return }
+        // Prefer the registered app over the running process's bundle: some apps
+        // (e.g. Steam) run from an inner helper bundle that LaunchServices rejects
+        // as "damaged" when opened directly.
+        let registered = app.bundleIdentifier.flatMap {
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)
+        }
+        guard let url = [registered, app.bundleURL].compactMap({ $0 })
+            .first(where: { $0.pathExtension == "app" }) else { return }
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
         NSWorkspace.shared.openApplication(at: url, configuration: config)
