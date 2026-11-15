@@ -318,6 +318,7 @@ private struct GeneralSettings: View {
     @AppStorage("restoreOnSwitch") private var restoreOnSwitch = true
     @AppStorage("syncClaudeSession") private var syncClaudeSession = true
     @AppStorage(SmartLabels.enabledKey) private var smartLabels = true
+    @AppStorage(WorkspaceManager.onlyThisWorkspaceKey) private var onlyThisWorkspace = true
     @AppStorage("activeWorkspaceLimit") private var limit = 5
     @AppStorage("splitMinWidth") private var splitMinWidth = 2400.0
 
@@ -331,6 +332,11 @@ private struct GeneralSettings: View {
             Section("切换") {
                 Toggle("切换窗口时显示磨砂过渡", isOn: $curtain)
                 Text("系统开启“减弱动态效果”时，所有动画会改为淡入淡出。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Toggle("调度中心只显示当前工作区的窗口", isOn: $onlyThisWorkspace)
+                    .onChange(of: onlyThisWorkspace) { _ in manager.onlyThisWorkspaceChanged() }
+                Text("三指上滑时只看到这个工作区的窗口：其他工作区的应用会被隐藏，同一个应用（比如浏览器）在其他工作区的窗口会被最小化，切回去时自动恢复。想让程序坞不被这些最小化的窗口占满，可以在“系统设置 → 桌面与程序坞”里打开“将窗口最小化至应用程序图标”。关闭这一项后只显示当前标签的应用。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

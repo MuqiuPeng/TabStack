@@ -398,6 +398,8 @@ final class WorkspaceManager: ObservableObject {
     private func performSwitch(to tab: AppTab, alsoHide: [String]) {
         guard currentID == primary(of: tab).id else { return } // superseded by a newer switch
 
+        if onlyThisWorkspace { showWholeWorkspace() }
+
         // Activate the target *before* hiding the others: hiding the frontmost app makes
         // macOS hand focus to some other app first.
         if let app = runningApp(tab.bundleID) {
@@ -409,6 +411,14 @@ final class WorkspaceManager: ObservableObject {
             launch(tab)
         }
 
+        if onlyThisWorkspace {
+            // Every app of another workspace is put away, not only those of the one left:
+            // a window opened from elsewhere (a Notion page, say) must not linger here.
+            let others = Set(allTabs.map(\.bundleID) + alsoHide).subtracting(shownApps)
+            for id in others { if let app = runningApp(id), !app.isHidden { app.hide() } }
+            return
+        }
+
         // Other apps are hidden. Other tabs of the *same* app can't be hidden one by one;
         // they share the content frame, so the raised window simply covers them.
         var shown: Set<String> = [tab.bundleID]
@@ -416,6 +426,90 @@ final class WorkspaceManager: ObservableObject {
         let others = Set(tabs.map(\.bundleID) + alsoHide).subtracting(shown)
             .subtracting(appsOnOtherDisplays)
         for id in others { runningApp(id)?.hide() }
+    }
+
+    // MARK: Mission Control
+
+    /// Mission Control shows every window of every app that is not hidden, minimized
+    /// windows excepted. With this on (the default), it shows the current workspace and
+    /// nothing else: all of the workspace's apps stay un-hidden (the selected window
+    /// covers the others in the content area), the windows those apps have in other
+    /// workspaces are minimized, and the apps of other workspaces are hidden. Off: only
+    /// the selected tab's app is shown, as before.
+    static let onlyThisWorkspaceKey = "onlyThisWorkspace"
+    var onlyThisWorkspace: Bool { UserDefaults.standard.object(forKey: Self.onlyThisWorkspaceKey) as? Bool ?? true }
+
+    /// Windows TabStack minimized because they belong to another workspace. Only these are
+    /// brought back; a window the user minimized stays minimized. Kept across launches.
+    private var parked: Set<CGWindowID> = Set(
+        (UserDefaults.standard.array(forKey: "parkedWindows") as? [Int] ?? []).map { CGWindowID($0) })
+
+    private func saveParked() {
+        UserDefaults.standard.set(parked.map { Int($0) }, forKey: "parkedWindows")
+    }
+
+    /// Apps with windows on screen: this workspace's and those shown on other displays.
+    private var shownApps: Set<String> { Set(tabs.map(\.bundleID)).union(appsOnOtherDisplays) }
+
+    /// Window ids that belong on screen: tabs of this workspace and of the other displays'.
+    private var shownWindowIDs: Set<CGWindowID> {
+        let ids = Set(otherDisplays.values.map(\.workspace)).union([currentWorkspaceID])
+        return Set(workspaces.filter { ids.contains($0.id) }.flatMap { $0.tabs.compactMap(\.windowID) })
+    }
+
+    /// Un-hides this workspace's apps, minimizing first their windows that belong only to
+    /// other workspaces and bringing back the ones parked earlier that belong here.
+    private func showWholeWorkspace() {
+        let keep = shownWindowIDs
+        let foreign = Set(allTabs.compactMap(\.windowID)).subtracting(keep)
+        let before = parked
+        for id in Set(tabs.map(\.bundleID)) {
+            guard let app = runningApp(id) else { continue }
+            for w in AX.windowsIncludingHidden(pid: app.processIdentifier) {
+                guard let wid = AX.windowID(w) else { continue }
+                let minimized = (AX.attr(w, kAXMinimizedAttribute) as Bool?) == true
+                if foreign.contains(wid), !minimized {
+                    // While the app is still hidden this happens out of sight.
+                    if AX.set(w, kAXMinimizedAttribute, kCFBooleanTrue) { parked.insert(wid) }
+                } else if keep.contains(wid), parked.contains(wid) {
+                    if minimized { _ = AX.set(w, kAXMinimizedAttribute, kCFBooleanFalse) }
+                    parked.remove(wid)
+                }
+            }
+            if app.isHidden { app.unhide() }
+        }
+        if parked != before {
+            noteFocusHandoff()
+            saveParked()
+        }
+    }
+
+    /// A window restored in the background for another workspace, while its app is on
+    /// screen here: minimize it so it stays out of Mission Control.
+    private func park(_ w: AXUIElement) {
+        guard let wid = AX.windowID(w), !shownWindowIDs.contains(wid) else { return }
+        if AX.set(w, kAXMinimizedAttribute, kCFBooleanTrue) {
+            parked.insert(wid)
+            saveParked()
+        }
+    }
+
+    /// The setting was turned off: bring back every parked window and show only the
+    /// selected tab's app again.
+    func onlyThisWorkspaceChanged() {
+        if onlyThisWorkspace {
+            if let tab = currentTab { select(tab) }
+            return
+        }
+        for id in Set(allTabs.map(\.bundleID)) {
+            guard let app = runningApp(id) else { continue }
+            for w in AX.windowsIncludingHidden(pid: app.processIdentifier) {
+                if let wid = AX.windowID(w), parked.contains(wid) { _ = AX.set(w, kAXMinimizedAttribute, kCFBooleanFalse) }
+            }
+        }
+        parked = []
+        saveParked()
+        if let tab = currentTab { select(tab) }
     }
 
     func selectIndex(_ index: Int) {
@@ -655,10 +749,14 @@ final class WorkspaceManager: ObservableObject {
         if let frame = frame(for: tab, on: display).map(AX.toAX), !AX.isFullScreen(w) {
             AX.setFrame(w, frame, center: false)
         }
-        let onScreen = Set([currentTab, currentTab.flatMap(partner)].compactMap { $0?.bundleID })
-            .union(appsOnOtherDisplays)
+        let onScreen = onlyThisWorkspace ? shownApps
+            : Set([currentTab, currentTab.flatMap(partner)].compactMap { $0?.bundleID }).union(appsOnOtherDisplays)
         if !onScreen.contains(tab.bundleID) {
             runningApp(tab.bundleID)?.hide()
+            return
+        }
+        if onlyThisWorkspace, let wid = AX.windowID(w), !shownWindowIDs.contains(wid) {
+            park(w)
             return
         }
         // Same app as what is showing: raise the shown windows again, the selected one last.
