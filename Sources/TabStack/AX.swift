@@ -82,7 +82,20 @@ enum AX {
     static func windows(pid: pid_t) -> [AXUIElement] {
         let app = AXUIElementCreateApplication(pid)
         let all: [AXUIElement] = attr(app, kAXWindowsAttribute) ?? []
-        return all.filter(isStandard)
+        return all.filter(isStandard) + helperWindows(of: pid)
+    }
+
+    /// Standard windows drawn by the app's helper processes (bundle id "<app id>.*"), e.g.
+    /// Steam's main window belongs to com.valvesoftware.steam.helper.
+    private static func helperWindows(of pid: pid_t) -> [AXUIElement] {
+        guard let id = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier else { return [] }
+        return NSWorkspace.shared.runningApplications
+            .filter { $0.processIdentifier != pid && ($0.bundleIdentifier?.hasPrefix(id + ".") ?? false) }
+            .flatMap { helper -> [AXUIElement] in
+                let el = AXUIElementCreateApplication(helper.processIdentifier)
+                let ws: [AXUIElement] = attr(el, kAXWindowsAttribute) ?? []
+                return ws.filter(isStandard)
+            }
     }
 
     /// Like `windows(pid:)`, but also finds the windows that the AXWindows attribute leaves

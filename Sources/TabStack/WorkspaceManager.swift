@@ -565,7 +565,9 @@ final class WorkspaceManager: ObservableObject {
     private func isLive(_ id: CGWindowID, of bundleID: String) -> Bool {
         guard liveWindowIDs.contains(id) else { return false }
         // Owner unknown (window seen by AX before the next refresh): trust the id.
-        return windowOwners[id].map { $0.isEmpty || $0 == bundleID } ?? true
+        // Helper processes count as the app (Steam draws its window from
+        // com.valvesoftware.steam.helper).
+        return windowOwners[id].map { $0.isEmpty || $0 == bundleID || $0.hasPrefix(bundleID + ".") } ?? true
     }
 
     /// Whether clicking the tab can show something right away: the app runs and the window
