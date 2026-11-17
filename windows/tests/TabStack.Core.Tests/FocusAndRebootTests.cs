@@ -1,0 +1,155 @@
+using TabStack.Core;
+
+namespace TabStack.Core.Tests;
+
+/// <summary>Following focus, covering a closed window, rebinding after a reboot, labels.</summary>
+public sealed class FocusAndRebootTests : IDisposable
+{
+    readonly string dir = Path.Combine(Path.GetTempPath(), "tabstack-tests-" + Guid.NewGuid().ToString("N"));
+    readonly FakePlatform os = new();
+    double now = 1_700_000_000;
+
+    WorkspaceManager Manager() => new(os, new Store(Path.Combine(dir, "state.json")), new HiddenLedger(Path.Combine(dir, "hidden.json")), () => now);
+
+    public void Dispose() { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+
+    WindowInfo Info(FakePlatform.Win w) => os.Describe(w.Hwnd)!;
+
+    [Fact]
+    public void AWindowOfAHiddenWorkspaceComingForwardIsFollowed()
+    {
+        var code = os.Open(@"c:\code.exe", "proj");
+        var chat = os.Open(@"c:\tim.exe", "Chat");
+        var m = Manager();
+        var home = m.Current;
+        m.AddWindow(Info(code));
+        var life = m.CreateWorkspace("Life");
+        m.SwitchWorkspace(life.Id);
+        var tChat = m.AddWindow(Info(chat));
+        m.SwitchWorkspace(home.Id);
+        Assert.False(os.Get(chat.Hwnd).Visible);
+
+        now += 5; // well after our own switch
+        os.Activate(chat.Hwnd); // the app showed its window itself (a message came in)
+        m.OnForeground(chat.Hwnd);
+        Assert.Equal(life.Id, m.FollowTarget(chat.Hwnd)?.Id);
+        m.Follow(chat.Hwnd, life.Id);
+        Assert.Equal(life.Id, m.Current.Id);
+        Assert.Equal(tChat.Id, m.Current.LastTabID);
+        Assert.False(m.FocusOutside);
+        Assert.False(os.Get(code.Hwnd).Visible);
+    }
+
+    [Fact]
+    public void FocusHandedOverIsNotFollowed()
+    {
+        var code = os.Open(@"c:\code.exe", "proj");
+        var chat = os.Open(@"c:\tim.exe", "Chat");
+        var m = Manager();
+        var home = m.Current;
+        m.AddWindow(Info(code));
+        var life = m.CreateWorkspace("Life");
+        m.SwitchWorkspace(life.Id);
+        m.AddWindow(Info(chat));
+        m.SwitchWorkspace(home.Id);
+        now += 5;
+        m.NoteHandoff(); // e.g. a window was just minimized
+        os.Activate(chat.Hwnd);
+        Assert.Null(m.FollowTarget(chat.Hwnd));
+        m.Follow(chat.Hwnd, life.Id);
+        Assert.Equal(home.Id, m.Current.Id);
+    }
+
+    [Fact]
+    public void AnUnrelatedWindowClearsTheHighlight()
+    {
+        var code = os.Open(@"c:\code.exe", "proj");
+        var other = os.Open(@"c:\calc.exe", "Calculator");
+        var m = Manager();
+        var t = m.AddWindow(Info(code));
+        m.SelectTab(t.Id);
+        Assert.False(m.FocusOutside);
+        os.Activate(other.Hwnd);
+        m.OnForeground(other.Hwnd);
+        Assert.True(m.FocusOutside);
+        Assert.Null(m.FollowTarget(other.Hwnd));
+        os.Activate(code.Hwnd);
+        m.OnForeground(code.Hwnd);
+        Assert.False(m.FocusOutside);
+    }
+
+    [Fact]
+    public void ClosingTheShownWindowShowsTheNextOpenTab()
+    {
+        var a = os.Open(@"c:\a.exe", "A");
+        var b = os.Open(@"c:\b.exe", "B");
+        var c = os.Open(@"c:\c.exe", "C");
+        var m = Manager();
+        var ta = m.AddWindow(Info(a));
+        var tb = m.AddWindow(Info(b));
+        var tc = m.AddWindow(Info(c));
+        m.SelectTab(tb.Id);
+        os.Close(b.Hwnd);
+        os.Foreground = 0; // Windows gave the focus to the desktop
+        m.CoverClosed(tb.Id, b.Hwnd);
+        Assert.Equal(tc.Id, m.Current.LastTabID);
+        Assert.Equal(c.Hwnd, os.Foreground);
+        Assert.Contains(m.Current.Tabs, t => t.Id == tb.Id); // the closed tab stays
+
+        // The last tab closes: the one before it covers.
+        os.Close(c.Hwnd);
+        os.Foreground = 0;
+        m.CoverClosed(tc.Id, c.Hwnd);
+        Assert.Equal(ta.Id, m.Current.LastTabID);
+    }
+
+    [Fact]
+    public void ClosingAWindowWhenWindowsFocusedAnotherOfTheWorkspaceKeepsThat()
+    {
+        var a = os.Open(@"c:\a.exe", "A");
+        var b = os.Open(@"c:\b.exe", "B");
+        var c = os.Open(@"c:\c.exe", "C");
+        var m = Manager();
+        var ta = m.AddWindow(Info(a));
+        var tb = m.AddWindow(Info(b));
+        m.AddWindow(Info(c));
+        m.SelectTab(tb.Id);
+        os.Close(b.Hwnd);
+        os.Activate(a.Hwnd);
+        m.CoverClosed(tb.Id, b.Hwnd);
+        Assert.Equal(ta.Id, m.Current.LastTabID);
+    }
+
+    [Fact]
+    public void AfterARebootTabsRebindByTitleNotByOldHandle()
+    {
+        var mail = os.Open(@"c:\chrome.exe", "Inbox");
+        var docs = os.Open(@"c:\chrome.exe", "Docs");
+        var m = Manager();
+        var tMail = m.AddWindow(Info(mail));
+        var tDocs = m.AddWindow(Info(docs));
+        Assert.Equal(100, tMail.Hwnd);
+
+        os.Reboot();
+        // The new windows come up in the other order: handle 100 is now Docs.
+        var docs2 = os.Open(@"c:\chrome.exe", "Docs");
+        var mail2 = os.Open(@"c:\chrome.exe", "Inbox");
+        Assert.Equal(100, docs2.Hwnd);
+
+        var m2 = Manager();
+        var t1 = m2.Current.Tab(tMail.Id)!;
+        var t2 = m2.Current.Tab(tDocs.Id)!;
+        Assert.Equal(mail2.Hwnd, t1.Hwnd);
+        Assert.Equal(docs2.Hwnd, t2.Hwnd);
+    }
+
+    [Theory]
+    [InlineData("Inbox (18) - someone@gmail.com - Gmail - Google Chrome", "Inbox (18) - someone@gmail.com - Gmail")]
+    [InlineData("(3) Messages - Google Chrome", "Messages")]
+    [InlineData("新标签页 和另外 3 个页面 - 个人 - Microsoft\u200b Edge", "新标签页")]
+    [InlineData("tdx 和 1 个其他选项卡 - 文件资源管理器", "tdx")]
+    [InlineData("YouTube - Audio playing - Google Chrome", "YouTube")]
+    [InlineData("Notes", "Notes")]
+    [InlineData("Google Chrome", "Google Chrome")]
+    public void TitlesLoseTheirNoise(string title, string label) => Assert.Equal(label, TitleLabels.Clean(title));
+}

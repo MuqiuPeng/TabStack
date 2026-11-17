@@ -60,4 +60,8 @@ public interface IWindowPlatform
 
     /// <summary>Work area of the monitor the window is on (the primary one if unknown).</summary>
     Rect WorkArea(long hwnd);
+
+    /// <summary>When the system started (seconds since 1970). Window handles only hold
+    /// within one boot.</summary>
+    double BootTime();
 }

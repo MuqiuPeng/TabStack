@@ -185,10 +185,39 @@ public sealed class WorkspaceManager
     /// <summary>Drop handles that no longer name the same app's window (after a restart).</summary>
     void ValidateBindings()
     {
+        var boot = platform.BootTime();
+        var rebooted = state.BootTime is { } saved && Math.Abs(saved - boot) > 120;
+        state.BootTime = boot;
+        if (rebooted)
+        {
+            foreach (var t in state.Workspaces.SelectMany(w => w.Tabs)) t.Hwnd = null;
+            RebindByTitle();
+            return;
+        }
         foreach (var t in state.Workspaces.SelectMany(w => w.Tabs))
         {
             if (t.Hwnd is { } h && platform.Describe(h)?.AppID != t.AppID)
                 t.Hwnd = null;
+        }
+    }
+
+    /// <summary>After a reboot: give every tab the window with exactly its title first, so a
+    /// tab is not handed another tab's window just because it was looked at earlier. The
+    /// rest bind as they are needed (<see cref="Resolve"/>).</summary>
+    void RebindByTitle()
+    {
+        var windows = platform.EnumerateWindows().ToList();
+        var held = new HashSet<long>();
+        var byWindow = new Dictionary<long, AppTab>();
+        foreach (var t in state.Workspaces.SelectMany(w => w.Tabs))
+        {
+            if (string.IsNullOrEmpty(t.Title)) continue;
+            var pick = windows.Find(w => w.AppID == t.AppID && w.Title == t.Title
+                && (!held.Contains(w.Hwnd) || (t.Shared == true && byWindow[w.Hwnd].Shared == true)));
+            if (pick is null) continue;
+            Bind(t, pick);
+            held.Add(pick.Hwnd);
+            byWindow.TryAdd(pick.Hwnd, t);
         }
     }
 
@@ -233,6 +262,7 @@ public sealed class WorkspaceManager
     public void SwitchWorkspace(Guid id)
     {
         if (id == Current.Id || Find(id) is not { } next) return;
+        NoteHandoff();
         var old = Current;
         var monitors = platform.Monitors();
         // Shown on another display already: the two displays trade workspaces, windows and all.
@@ -355,6 +385,7 @@ public sealed class WorkspaceManager
         var ws = Current;
         if (ws.Tab(tabID) is not { } tab) return false;
         ws.LastTabID = tab.Id;
+        FocusOutside = false;
         var w = Resolve(tab);
         if (w is not null) ShowTab(ws, tab, activate: true);
         Save();
@@ -502,11 +533,74 @@ public sealed class WorkspaceManager
             if (d is not null) FocusDisplay(d);
         }
         var tab = Current.Tabs.Find(t => t.Hwnd == hwnd);
-        if (tab is null || Current.LastTabID == tab.Id) return;
+        if (tab is null)
+        {
+            // A window of no workspace on screen: nothing in the sidebar has the focus.
+            if (FocusOutside) return;
+            FocusOutside = true;
+            Changed?.Invoke();
+            return;
+        }
+        var wasOutside = FocusOutside;
+        FocusOutside = false;
+        if (Current.LastTabID == tab.Id) { if (wasOutside) Changed?.Invoke(); return; }
         Current.LastTabID = tab.Id;
         Current.ForegroundTab = tab.Id;
         Save();
         Changed?.Invoke();
+    }
+
+    /// <summary>The foreground window is not one of the workspace on screen (the sidebar
+    /// highlights nothing).</summary>
+    public bool FocusOutside { get; private set; }
+
+    double handoffAt = double.NegativeInfinity;
+
+    /// <summary>Focus is about to move without the user choosing the window that gets it (a
+    /// window closed or minimized, TabStack hid windows): that window must not pull the
+    /// sidebar to its workspace.</summary>
+    public void NoteHandoff() => handoffAt = clock();
+
+    /// <summary>The workspace to follow focus to: the window is a tab of exactly one workspace
+    /// no display shows (an app brought its hidden window forward, a notification was
+    /// clicked…), and focus was not just handed over.</summary>
+    public Workspace? FollowTarget(long hwnd)
+    {
+        if (clock() - handoffAt < 1) return null;
+        var shown = Displayed.Select(w => w.Id).ToHashSet();
+        if (state.Workspaces.Any(w => shown.Contains(w.Id) && w.Tabs.Any(t => t.Hwnd == hwnd))) return null;
+        var owners = state.Workspaces.Where(w => w.Tabs.Any(t => t.Hwnd == hwnd)).ToList();
+        return owners.Count == 1 ? owners[0] : null;
+    }
+
+    /// <summary>Called a moment after focus went to <paramref name="hwnd"/>: if it is still
+    /// there and still belongs only to <paramref name="id"/>, switch to that workspace with
+    /// its tab selected.</summary>
+    public void Follow(long hwnd, Guid id)
+    {
+        if (platform.ForegroundWindow() != hwnd || FollowTarget(hwnd)?.Id != id || Find(id) is not { } ws) return;
+        var tab = ws.Tabs.First(t => t.Hwnd == hwnd);
+        ws.LastTabID = tab.Id;
+        ws.ForegroundTab = tab.Id;
+        SwitchWorkspace(id);
+        FocusOutside = false;
+        Changed?.Invoke();
+    }
+
+    /// <summary>The selected tab's window was closed: show the neighbouring tab (the next one,
+    /// else the one before) whose window is open, unless Windows already gave the focus to
+    /// another window of this workspace. Nothing is launched; the closed tab stays.</summary>
+    public void CoverClosed(Guid tabID, long closed)
+    {
+        var ws = Current;
+        if (ws.LastTabID != tabID || ws.Tab(tabID) is not { } cur || platform.Describe(closed) is not null) return;
+        if (cur.PairedWith is { } pid && ws.Tab(pid)?.Hwnd is { } ph && platform.Describe(ph) is not null) return;
+        var fg = platform.ForegroundWindow();
+        if (ws.Tabs.Any(t => t.Hwnd == fg)) { OnForeground(fg); return; }
+        var i = ws.Tabs.IndexOf(cur);
+        var order = ws.Tabs.Skip(i + 1).Concat(ws.Tabs.Take(i).Reverse());
+        var next = order.FirstOrDefault(t => t.Hwnd is { } h && h != closed && platform.Describe(h)?.AppID == t.AppID);
+        if (next is not null) SelectTab(next.Id);
     }
 
     /// <summary>Periodic refresh: titles, closed windows, dwell-time usage.</summary>

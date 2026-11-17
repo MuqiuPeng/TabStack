@@ -36,6 +36,9 @@ sealed class FakePlatform : IWindowPlatform
 
     public void Close(long hwnd) => Windows.RemoveAll(w => w.Hwnd == hwnd);
 
+    /// <summary>A reboot: every window is gone and handles start over.</summary>
+    public void Reboot() { Windows.Clear(); next = 100; Boot += 3600; }
+
     public Win Get(long hwnd) => Windows.Single(w => w.Hwnd == hwnd);
 
     static WindowInfo Info(Win w) => new(w.Hwnd, w.AppID, Path.GetFileNameWithoutExtension(w.AppID), w.Title,
@@ -87,6 +90,9 @@ sealed class FakePlatform : IWindowPlatform
     public void MoveTo(long hwnd, Rect rect) { var w = Get(hwnd); w.Rect = rect; w.State = PlacementState.Normal; w.Minimized = false; }
 
     public Rect WorkArea(long hwnd) => LayoutMath.Nearest(Get(hwnd).Rect, MonitorList).WorkArea;
+
+    public double Boot { get; set; } = 1_699_000_000;
+    public double BootTime() => Boot;
 
     /// <summary>A second monitor to the right of the first.</summary>
     public void AddSecondMonitor() =>

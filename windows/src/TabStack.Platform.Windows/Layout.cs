@@ -126,6 +126,9 @@ public sealed unsafe partial class WindowsPlatform
             SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
     }
 
+    public double BootTime() =>
+        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - Environment.TickCount64 / 1000.0;
+
     public CoreRect WorkArea(long handle)
     {
         var monitor = handle != 0

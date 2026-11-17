@@ -133,6 +133,9 @@ public sealed class AppState
     public Settings Settings { get; set; } = new();
     /// <summary>The display whose sidebar was used last; it shows <see cref="CurrentWorkspace"/>.</summary>
     public string? FocusedDisplay { get; set; }
+    /// <summary>When the system had started when the state was saved: a different value means
+    /// a reboot, after which saved window handles name nothing (or someone else's window).</summary>
+    public double? BootTime { get; set; }
     /// <summary>The workspace every other display with a sidebar shows, by monitor id.</summary>
     public Dictionary<string, Guid>? OtherDisplays { get; set; }
     /// <summary>What displays showed before they were unplugged, so they get it back.</summary>

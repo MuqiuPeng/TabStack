@@ -183,7 +183,8 @@ sealed class SidebarWindow : Window
     FrameworkElement TabButton(Workspace ws, AppTab tab)
     {
         var info = tab.Hwnd is { } h ? shell.Platform.Describe(h) : null;
-        var selected = ws.LastTabID == tab.Id;
+        // The focused workspace's tab is lit only while its window has the focus.
+        var selected = ws.LastTabID == tab.Id && !(ws.Id == M.Current.Id && M.FocusOutside);
         var image = IconCache.For(info?.ExePath ?? tab.ExePath);
         FrameworkElement glyph = image is not null
             ? new Image { Source = image, Width = 28, Height = 28 }
@@ -192,7 +193,21 @@ sealed class SidebarWindow : Window
                 Text = tab.Name.Length > 0 ? tab.Name[..1].ToUpperInvariant() : "?", FontSize = 18,
                 Foreground = Foreground0, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
             };
-        var grid = new Grid { Width = 56, Height = 48 };
+        // Several windows of one app (or a renamed tab): a label tells them apart.
+        var label = !string.IsNullOrEmpty(tab.CustomName) ? tab.CustomName
+            : ws.Tabs.Count(t => t.AppID == tab.AppID) > 1 ? TitleLabels.Clean(tab.Title ?? tab.Name) : null;
+        var grid = new Grid { Width = 56, Height = label is null ? 48 : 60 };
+        if (label is not null)
+        {
+            glyph.VerticalAlignment = VerticalAlignment.Top;
+            glyph.Margin = new Thickness(0, 6, 0, 0);
+            grid.Children.Add(new TextBlock
+            {
+                Text = label, FontSize = 9, Foreground = Foreground0, TextTrimming = TextTrimming.CharacterEllipsis,
+                TextAlignment = TextAlignment.Center, HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(4, 0, 4, 2),
+            });
+        }
         grid.Children.Add(new Border
         {
             Width = 3, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 10, 0, 10),

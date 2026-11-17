@@ -55,11 +55,27 @@ public sealed class AppShell
         manager.Notice += text => { Log.Write(text); tray.Notify(text); };
 
         events = new WinEvents();
-        events.Foreground += h => { manager.OnForeground(h); if (InCurrent(h)) ScheduleCapture(); };
+        events.Foreground += h =>
+        {
+            manager.OnForeground(h);
+            if (InCurrent(h)) ScheduleCapture();
+            // A window of a workspace not on screen came forward: follow it there once focus
+            // has stayed on it for a moment.
+            if (manager.FollowTarget(h) is { } ws)
+            {
+                var id = ws.Id;
+                After(400, () => manager.Follow(h, id));
+            }
+        };
+        events.Minimized += _ => manager.NoteHandoff();
         events.LayoutChanged += h => { if (InCurrent(h)) ScheduleCapture(); };
         events.TitleChanged += h => { if (InCurrent(h)) ScheduleRefresh(); };
         events.Destroyed += h =>
         {
+            if (manager.TabsOf(h).Any()) manager.NoteHandoff();
+            // The selected window closed: once Windows has moved the focus, cover the gap.
+            if (manager.Current.LastTabID is { } sel && manager.Current.Tab(sel)?.Hwnd == h)
+                After(150, () => manager.CoverClosed(sel, h));
             manager.OnDestroyed(h);
             if (manager.TabsOf(h).Any()) ScheduleRefresh();
         };
@@ -117,6 +133,13 @@ public sealed class AppShell
     /// <summary>Keeps the current workspace's layout snapshot fresh (500 ms after the last move),
     /// so a crash loses at most that much.</summary>
     void ScheduleCapture() => Debounce(ref capture, 500, () => manager!.CaptureCurrent());
+
+    static void After(int ms, Action action)
+    {
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ms) };
+        t.Tick += (_, _) => { t.Stop(); action(); };
+        t.Start();
+    }
 
     static void Debounce(ref DispatcherTimer? t, int ms, Action action)
     {

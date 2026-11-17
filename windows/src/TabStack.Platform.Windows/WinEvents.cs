@@ -22,6 +22,8 @@ public sealed class WinEvents : IDisposable
     public event Action<long>? Destroyed;
     /// <summary>A top-level window was shown.</summary>
     public event Action<long>? Shown;
+    /// <summary>A top-level window was minimized.</summary>
+    public event Action<long>? Minimized;
     /// <summary>A window finished moving or resizing, or was minimized or restored.</summary>
     public event Action<long>? LayoutChanged;
 
@@ -54,8 +56,8 @@ public sealed class WinEvents : IDisposable
             case PInvoke.EVENT_OBJECT_NAMECHANGE: TitleChanged?.Invoke(h); break;
             case PInvoke.EVENT_OBJECT_DESTROY: Destroyed?.Invoke(h); break;
             case PInvoke.EVENT_OBJECT_SHOW: Shown?.Invoke(h); break;
+            case PInvoke.EVENT_SYSTEM_MINIMIZESTART: Minimized?.Invoke(h); LayoutChanged?.Invoke(h); break;
             case PInvoke.EVENT_SYSTEM_MOVESIZEEND:
-            case PInvoke.EVENT_SYSTEM_MINIMIZESTART:
             case PInvoke.EVENT_SYSTEM_MINIMIZEEND:
             case PInvoke.EVENT_OBJECT_LOCATIONCHANGE: LayoutChanged?.Invoke(h); break;
         }

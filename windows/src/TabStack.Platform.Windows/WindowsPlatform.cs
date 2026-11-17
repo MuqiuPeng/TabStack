@@ -69,6 +69,9 @@ public sealed unsafe partial class WindowsPlatform : IWindowPlatform
 
         var exe = ExePath(appPid);
         var aumid = WindowAumid(hwnd) ?? ProcessAumid(appPid);
+        // A helper process drawing the app's window (Steam's steamwebhelper.exe): the window
+        // is the app's, and relaunching means starting the app, not the helper.
+        if (exe is not null && HelperOwner(appPid, exe) is { } owner) (appPid, exe) = owner;
         var appID = aumid ?? exe?.ToLowerInvariant() ?? $"pid:{appPid}";
         var title = Text(hwnd);
         return new WindowInfo(handle, appID, AppName(exe, aumid, title), title, cls, (int)appPid, exe,
@@ -170,6 +173,45 @@ public sealed unsafe partial class WindowsPlatform : IWindowPlatform
         uint size = 1024;
         return PInvoke.QueryFullProcessImageName(h, PROCESS_NAME_FORMAT.PROCESS_NAME_WIN32, buf, ref size)
             ? new string(buf, 0, (int)size) : null;
+    }
+
+    static readonly Dictionary<(uint, string), (uint, string)?> helperOwners = new();
+
+    /// <summary>The app a helper process works for: its parent, when the helper's name says
+    /// it is one ("…helper.exe") and it lives inside the parent's folder.</summary>
+    static (uint pid, string exe)? HelperOwner(uint pid, string exe)
+    {
+        if (!Path.GetFileNameWithoutExtension(exe).Contains("helper", StringComparison.OrdinalIgnoreCase)) return null;
+        lock (helperOwners)
+        {
+            if (helperOwners.TryGetValue((pid, exe), out var known)) return known;
+            (uint, string)? found = null;
+            if (ParentPid(pid) is { } parent && ExePath(parent) is { } pexe
+                && !string.Equals(pexe, exe, StringComparison.OrdinalIgnoreCase)
+                && Path.GetDirectoryName(exe) is { } dir && Path.GetDirectoryName(pexe) is { } pdir
+                && (dir + "\\").StartsWith(pdir + "\\", StringComparison.OrdinalIgnoreCase)
+                && StartTime(parent) is { } ps && StartTime(pid) is { } cs && ps <= cs) // not a reused pid
+                found = (parent, pexe);
+            helperOwners[(pid, exe)] = found;
+            return found;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct ProcessBasicInformation
+    {
+        public nint ExitStatus, PebBaseAddress, AffinityMask, BasePriority, UniqueProcessId, InheritedFromUniqueProcessId;
+    }
+
+    [DllImport("ntdll.dll")]
+    static extern int NtQueryInformationProcess(nint process, int infoClass, out ProcessBasicInformation info, int size, out int returned);
+
+    static uint? ParentPid(uint pid)
+    {
+        using var h = OpenQuery(pid);
+        if (h is null) return null;
+        var ok = NtQueryInformationProcess(h.DangerousGetHandle(), 0, out var info, Marshal.SizeOf<ProcessBasicInformation>(), out _) == 0;
+        return ok && info.InheritedFromUniqueProcessId != 0 ? (uint)info.InheritedFromUniqueProcessId : null;
     }
 
     static long? StartTime(uint pid)
