@@ -87,6 +87,22 @@ public sealed class AppShell
             if (manager.TabsOf(h).Any()) ScheduleRefresh();
         };
 
+        // An app closing its window to the tray only hides it. Treat that like closing: the
+        // tab goes dim, and if it was selected the neighbouring tab shows. (Our own hiding is
+        // in the ledger, so Live still sees those windows.)
+        events.Hidden += h =>
+        {
+            if (!manager.TabsOf(h).Any()) return;
+            After(150, () =>
+            {
+                if (manager.Live(h) is not null) return;
+                manager.NoteHandoff();
+                if (manager.Current.LastTabID is { } sel && manager.Current.Tab(sel)?.Hwnd == h)
+                    manager.CoverClosed(sel, h);
+                manager.Tick();
+            });
+        };
+
         RegisterHotKeys();
 
         timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
@@ -187,7 +203,7 @@ public sealed class AppShell
         }
         else if (id.StartsWith("tab") && int.TryParse(id[3..], out var t))
         {
-            if (m.Current.Tabs.ElementAtOrDefault(t - 1) is { } tab) m.SelectTab(tab.Id);
+            if (m.Current.Tabs.ElementAtOrDefault(t - 1) is { } tab) OpenTab(tab);
         }
         else switch (id)
         {
@@ -200,6 +216,22 @@ public sealed class AppShell
             case "closeWindow": CloseForeground(); break;
             case "toggleSidebar": ToggleSidebars(); break;
         }
+    }
+
+    /// <summary>Shows a tab's window; when it has none (closed, or closed to the tray), starts
+    /// its app, which brings its own window back, and selects that once it appears.</summary>
+    public void OpenTab(AppTab tab)
+    {
+        var m = manager!;
+        if (m.SelectTab(tab.Id)) return;
+        if (!Launcher.Start(tab)) return;
+        var deadline = DateTime.Now.AddSeconds(15);
+        var poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        poll.Tick += (_, _) =>
+        {
+            if (m.Current.Tab(tab.Id) is null || DateTime.Now > deadline || m.SelectTab(tab.Id)) poll.Stop();
+        };
+        poll.Start();
     }
 
     /// <summary>Ctrl+Alt+D (Mac ⌃⌥D): close the active window and drop its tabs; the

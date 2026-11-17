@@ -94,7 +94,7 @@ sealed class Panels
             // Windows other workspaces keep out of sight: adding one shares it (like Claude).
             foreach (var ws in M.Workspaces.Where(w => w.Id != M.Current.Id))
                 foreach (var t in ws.Tabs)
-                    if (t.Hwnd is { } h && !here.Contains(h) && candidates.All(c => c.w.Hwnd != h) && platform.Describe(h) is { } info)
+                    if (t.Hwnd is { } h && !here.Contains(h) && candidates.All(c => c.w.Hwnd != h) && M.Live(h) is { } info)
                         candidates.Add((info, "In " + ws.Name));
 
             var rows = new List<PickerItem>();

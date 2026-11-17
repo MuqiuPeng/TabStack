@@ -173,7 +173,9 @@ public sealed class WorkspaceManager
         foreach (var t in ws.Tabs)
         {
             if (t.Hwnd is not { } h || keep.Contains(h)) continue;
-            if (platform.Describe(h) is not { } info || info.Locked) continue;
+            // Locked: we can't hide it. Closed by its app: already out of sight, and taking it
+            // into the ledger would have it shown (unresponsive) when the workspace comes back.
+            if (Live(h) is not { } info || info.Locked) continue;
             PutAway(h, info.AppID);
         }
     }
@@ -227,7 +229,7 @@ public sealed class WorkspaceManager
     {
         if (tab.Hwnd is { } h)
         {
-            if (platform.Describe(h) is { } info && info.AppID == tab.AppID) return info;
+            if (platform.Describe(h) is { } info && info.AppID == tab.AppID && Open(info)) return info;
             tab.Hwnd = null;
         }
         var held = state.Workspaces.SelectMany(w => w.Tabs)
@@ -244,6 +246,15 @@ public sealed class WorkspaceManager
         Bind(tab, pick);
         return pick;
     }
+
+    /// <summary>Whether a window can be shown from outside: it is on screen, or hidden by us.
+    /// A window its own app hid (closed to the tray: Claude, chat apps, Electron apps) counts
+    /// as closed. Showing it with ShowWindow leaves a window the app believes is closed, which
+    /// doesn't paint or respond; only the app can bring it back (start it again).</summary>
+    public bool Open(WindowInfo info) => info.Visible || ledger.Contains(info.Hwnd);
+
+    /// <summary>The window, if it exists and is <see cref="Open"/>.</summary>
+    public WindowInfo? Live(long hwnd) => platform.Describe(hwnd) is { } info && Open(info) ? info : null;
 
     static void Bind(AppTab tab, WindowInfo w)
     {
@@ -455,6 +466,7 @@ public sealed class WorkspaceManager
     List<List<long>> Groups(Workspace ws)
     {
         var snapped = ws.Tabs.Select(t => t.Hwnd).OfType<long>().Distinct()
+            .Where(h => Live(h) is not null)
             .Select(h => (h, p: platform.GetPlacement(h)))
             .Where(x => x.p is { State: PlacementState.Snapped })
             .Select(x => (h: x.h, r: x.p!.ActualRect, m: x.p.Monitor)).ToList();
@@ -602,12 +614,12 @@ public sealed class WorkspaceManager
     public void CoverClosed(Guid tabID, long closed)
     {
         var ws = Current;
-        if (ws.LastTabID != tabID || ws.Tab(tabID) is not { } cur || platform.Describe(closed) is not null) return;
+        if (ws.LastTabID != tabID || ws.Tab(tabID) is not { } cur || Live(closed) is not null) return;
         var fg = platform.ForegroundWindow();
         if (ws.Tabs.Any(t => t.Hwnd == fg)) { OnForeground(fg); return; }
         var i = ws.Tabs.IndexOf(cur);
         var order = ws.Tabs.Skip(i + 1).Concat(ws.Tabs.Take(i).Reverse());
-        var next = order.FirstOrDefault(t => t.Hwnd is { } h && h != closed && platform.Describe(h)?.AppID == t.AppID);
+        var next = order.FirstOrDefault(t => t.Hwnd is { } h && h != closed && Live(h)?.AppID == t.AppID);
         if (next is not null) SelectTab(next.Id);
     }
 
@@ -619,7 +631,7 @@ public sealed class WorkspaceManager
         {
             if (t.Hwnd is not { } h) continue;
             var info = platform.Describe(h);
-            if (info is null || info.AppID != t.AppID) { t.Hwnd = null; changed = true; continue; }
+            if (info is null || info.AppID != t.AppID || !Open(info)) { t.Hwnd = null; changed = true; continue; }
             if (info.Title.Length > 0 && info.Title != t.Title) { t.Title = info.Title; changed = true; }
         }
         var now = clock();

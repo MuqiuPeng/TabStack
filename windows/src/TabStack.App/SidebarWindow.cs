@@ -201,7 +201,7 @@ sealed class SidebarWindow : Window
 
     FrameworkElement TabButton(Workspace ws, AppTab tab, Dictionary<Guid, int> groups)
     {
-        var info = tab.Hwnd is { } h ? shell.Platform.Describe(h) : null;
+        var info = tab.Hwnd is { } h ? M.Live(h) : null;
         // The focused workspace's tab is lit only while its window has the focus.
         var selected = ws.LastTabID == tab.Id && !(ws.Id == M.Current.Id && M.FocusOutside);
         var image = IconCache.For(info?.ExePath ?? tab.ExePath);
@@ -264,22 +264,7 @@ sealed class SidebarWindow : Window
         return b;
     }
 
-    void ClickTab(AppTab tab)
-    {
-        if (M.SelectTab(tab.Id)) return;
-        // No window to bind: start the app and bind the first window it opens.
-        var exe = tab.ExePath ?? (File.Exists(tab.AppID) ? tab.AppID : null);
-        if (exe is null) return;
-        try { Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true }); }
-        catch (Exception e) { Log.Write($"launch {exe}: {e.Message}"); return; }
-        var deadline = DateTime.Now.AddSeconds(15);
-        var poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
-        poll.Tick += (_, _) =>
-        {
-            if (M.Current.Tab(tab.Id) is null || DateTime.Now > deadline || M.SelectTab(tab.Id)) poll.Stop();
-        };
-        poll.Start();
-    }
+    void ClickTab(AppTab tab) => shell.OpenTab(tab);
 
     static Button IconButton(string text, string tip) => new()
     {

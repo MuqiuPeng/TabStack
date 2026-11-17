@@ -22,6 +22,8 @@ public sealed class WinEvents : IDisposable
     public event Action<long>? Destroyed;
     /// <summary>A top-level window was shown.</summary>
     public event Action<long>? Shown;
+    /// <summary>A top-level window was hidden (by us, or by its app closing to the tray).</summary>
+    public event Action<long>? Hidden;
     /// <summary>A top-level window was minimized.</summary>
     public event Action<long>? Minimized;
     /// <summary>A window finished moving or resizing, or was minimized or restored.</summary>
@@ -31,7 +33,7 @@ public sealed class WinEvents : IDisposable
     {
         proc = Callback;
         Hook(PInvoke.EVENT_SYSTEM_FOREGROUND, PInvoke.EVENT_SYSTEM_FOREGROUND);
-        Hook(PInvoke.EVENT_OBJECT_DESTROY, PInvoke.EVENT_OBJECT_SHOW);
+        Hook(PInvoke.EVENT_OBJECT_DESTROY, PInvoke.EVENT_OBJECT_HIDE);
         Hook(PInvoke.EVENT_OBJECT_NAMECHANGE, PInvoke.EVENT_OBJECT_NAMECHANGE);
         Hook(PInvoke.EVENT_SYSTEM_MOVESIZEEND, PInvoke.EVENT_SYSTEM_MOVESIZEEND);
         Hook(PInvoke.EVENT_SYSTEM_MINIMIZESTART, PInvoke.EVENT_SYSTEM_MINIMIZEEND);
@@ -56,6 +58,7 @@ public sealed class WinEvents : IDisposable
             case PInvoke.EVENT_OBJECT_NAMECHANGE: TitleChanged?.Invoke(h); break;
             case PInvoke.EVENT_OBJECT_DESTROY: Destroyed?.Invoke(h); break;
             case PInvoke.EVENT_OBJECT_SHOW: Shown?.Invoke(h); break;
+            case PInvoke.EVENT_OBJECT_HIDE: Hidden?.Invoke(h); break;
             case PInvoke.EVENT_SYSTEM_MINIMIZESTART: Minimized?.Invoke(h); LayoutChanged?.Invoke(h); break;
             case PInvoke.EVENT_SYSTEM_MOVESIZEEND:
             case PInvoke.EVENT_SYSTEM_MINIMIZEEND:

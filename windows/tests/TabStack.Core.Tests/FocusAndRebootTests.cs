@@ -197,4 +197,61 @@ public sealed class FocusAndRebootTests : IDisposable
     [InlineData("Notes", "Notes")]
     [InlineData("Google Chrome", "Google Chrome")]
     public void TitlesLoseTheirNoise(string title, string label) => Assert.Equal(label, TitleLabels.Clean(title));
+
+    // ───── Apps that close to the tray (Claude, chat apps): they hide their own window ─────
+
+    [Fact]
+    public void AWindowItsAppHidIsNotShownByClickingItsTab()
+    {
+        var claude = os.Open(@"c:\claude.exe", "Claude");
+        var m = Manager();
+        var tab = m.AddWindow(Info(claude));
+        os.Hide(claude.Hwnd); // closed to the tray
+        Assert.Null(m.Live(claude.Hwnd));
+        Assert.False(m.SelectTab(tab.Id)); // the caller starts the app instead
+        Assert.False(os.Get(claude.Hwnd).Visible);
+    }
+
+    [Fact]
+    public void ComingBackToAWorkspaceDoesNotShowAWindowItsAppHid()
+    {
+        var claude = os.Open(@"c:\claude.exe", "Claude");
+        var m = Manager();
+        var home = m.Current;
+        m.AddWindow(Info(claude));
+        os.Hide(claude.Hwnd); // closed to the tray while on screen
+        var other = m.CreateWorkspace("Other");
+        m.SwitchWorkspace(other.Id);
+        m.SwitchWorkspace(home.Id);
+        Assert.False(os.Get(claude.Hwnd).Visible);
+    }
+
+    [Fact]
+    public void AWindowWeHidIsStillShownWhenComingBack()
+    {
+        var a = os.Open(@"c:.exe", "A");
+        var m = Manager();
+        var home = m.Current;
+        var tab = m.AddWindow(Info(a));
+        var other = m.CreateWorkspace("Other");
+        m.SwitchWorkspace(other.Id);
+        Assert.NotNull(m.Live(a.Hwnd)); // hidden, but by us
+        m.SwitchWorkspace(home.Id);
+        Assert.True(os.Get(a.Hwnd).Visible);
+        Assert.Equal(tab.Id, m.Current.LastTabID);
+    }
+
+    [Fact]
+    public void TheAppShowingItsWindowAgainRebindsTheTab()
+    {
+        var claude = os.Open(@"c:\claude.exe", "Claude");
+        var m = Manager();
+        var tab = m.AddWindow(Info(claude));
+        os.Hide(claude.Hwnd);
+        m.Tick();
+        Assert.Null(tab.Hwnd); // shown as closed
+        os.Show(claude.Hwnd); // the app was started again and brought its window back
+        Assert.True(m.SelectTab(tab.Id));
+        Assert.Equal(claude.Hwnd, tab.Hwnd);
+    }
 }
