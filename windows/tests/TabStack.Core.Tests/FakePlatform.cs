@@ -87,7 +87,17 @@ sealed class FakePlatform : IWindowPlatform
 
     public IReadOnlyList<MonitorInfo> Monitors() => MonitorList;
 
-    public void MoveTo(long hwnd, Rect rect) { var w = Get(hwnd); w.Rect = rect; w.State = PlacementState.Normal; w.Minimized = false; }
+    public List<long> LastRaise = new();
+    public void Raise(IReadOnlyList<long> bottomToTop)
+    {
+        LastRaise = bottomToTop.ToList();
+        foreach (var h in bottomToTop)
+        {
+            var w = Get(h);
+            Windows.Remove(w);
+            Windows.Insert(0, w);
+        }
+    }
 
     public Rect WorkArea(long hwnd) => LayoutMath.Nearest(Get(hwnd).Rect, MonitorList).WorkArea;
 

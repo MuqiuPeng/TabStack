@@ -54,9 +54,9 @@ public interface IWindowPlatform
 
     IReadOnlyList<MonitorInfo> Monitors();
 
-    /// <summary>Moves a window so its visible frame fills <paramref name="rect"/> (restoring it
-    /// first if maximized or minimized).</summary>
-    void MoveTo(long hwnd, Rect rect);
+    /// <summary>Brings windows to the front without activating them or changing their
+    /// placement, each above the one before (so the last ends up highest).</summary>
+    void Raise(IReadOnlyList<long> bottomToTop);
 
     /// <summary>Work area of the monitor the window is on (the primary one if unknown).</summary>
     Rect WorkArea(long hwnd);

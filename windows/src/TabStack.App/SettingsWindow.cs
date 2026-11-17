@@ -15,7 +15,6 @@ sealed class SettingsWindow : Window
     readonly ListBox minimizeList = new() { Height = 110 };
     readonly TextBox limitBox = new() { Width = 48 };
     readonly Dictionary<string, CheckBox> monitorBoxes = new();
-    readonly CheckBox tileNew = new() { Content = "Tile new workspaces by default" };
     readonly TextBlock status = new() { Foreground = Brushes.Firebrick, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
 
     WorkspaceManager M => shell.Manager;
@@ -49,9 +48,6 @@ sealed class SettingsWindow : Window
                 root.Children.Add(box);
             }
         }
-        tileNew.IsChecked = M.Settings.TileNewWorkspaces;
-        tileNew.Margin = new Thickness(0, 6, 0, 0);
-        root.Children.Add(tileNew);
 
         root.Children.Add(Header("Hotkeys (click a box, then press the keys; Backspace clears)"));
         var grid = new Grid();
@@ -146,7 +142,6 @@ sealed class SettingsWindow : Window
         M.UpdateSettings(s =>
         {
             s.NoSidebarMonitors = noSidebar;
-            s.TileNewWorkspaces = tileNew.IsChecked == true;
             s.MinimizeApps = minimizeList.Items.Cast<string>().ToList();
             s.HotKeys = HotKeyMap.All
                 .Where(a => chordBoxes[a.Id].Text != a.Default)

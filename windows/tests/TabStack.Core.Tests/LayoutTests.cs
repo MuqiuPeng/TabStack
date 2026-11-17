@@ -54,13 +54,4 @@ public class LayoutTests
         p.ActualRect = new Rect(1920, 0, 1920, 2100);
         Assert.Equal("R", LayoutMath.Fit(p, [Left, Right4k]).Monitor);
     }
-
-    [Fact]
-    public void TileSplitsWorkArea()
-    {
-        var w = new Rect(64, 0, 1857, 1040);
-        Assert.Equal(new Rect(64, 0, 928, 1040), LayoutMath.Tile(w, -1));
-        Assert.Equal(new Rect(992, 0, 929, 1040), LayoutMath.Tile(w, 1));
-        Assert.Equal(w, LayoutMath.Tile(w, 0));
-    }
 }

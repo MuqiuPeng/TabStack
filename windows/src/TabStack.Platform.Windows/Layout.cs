@@ -97,33 +97,11 @@ public sealed unsafe partial class WindowsPlatform
         return list;
     }
 
-    public void MoveTo(long handle, CoreRect rect)
+    public void Raise(IReadOnlyList<long> bottomToTop)
     {
-        var hwnd = (HWND)(nint)handle;
-        if (!PInvoke.IsWindow(hwnd)) return;
-        if (PInvoke.IsIconic(hwnd) || PInvoke.IsZoomed(hwnd)) PInvoke.ShowWindow(hwnd, SHOW_WINDOW_CMD.SW_RESTORE);
-        if (!Resizable(hwnd))
-        {
-            // Tiling a fixed-size window: centre it in the space instead of stretching it.
-            PInvoke.GetWindowRect(hwnd, out var cur);
-            int w = cur.right - cur.left, h = cur.bottom - cur.top;
-            int x = rect.X + Math.Max(0, (rect.W - w) / 2), y = rect.Y + Math.Max(0, (rect.H - h) / 2);
-            PInvoke.SetWindowPos(hwnd, HWND.Null, x, y, 0, 0,
-                SET_WINDOW_POS_FLAGS.SWP_NOSIZE | SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
-            return;
-        }
-        // Windows 10/11 frames have invisible resize borders: the window rect is larger than
-        // what you see. Grow the target by those margins so the visible frame fills it.
-        PInvoke.GetWindowRect(hwnd, out var outer);
-        RECT frame;
-        int l = 0, t = 0, r = 0, b = 0;
-        if (PInvoke.DwmGetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE.DWMWA_EXTENDED_FRAME_BOUNDS, &frame, (uint)sizeof(RECT)).Succeeded)
-        {
-            l = frame.left - outer.left; t = frame.top - outer.top;
-            r = outer.right - frame.right; b = outer.bottom - frame.bottom;
-        }
-        PInvoke.SetWindowPos(hwnd, HWND.Null, rect.X - l, rect.Y - t, rect.W + l + r, rect.H + t + b,
-            SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
+        foreach (var handle in bottomToTop)
+            PInvoke.SetWindowPos((HWND)(nint)handle, HWND.Null, 0, 0, 0, 0,
+                SET_WINDOW_POS_FLAGS.SWP_NOMOVE | SET_WINDOW_POS_FLAGS.SWP_NOSIZE | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
     }
 
     /// <summary>Whether a window fills the whole of a monitor (taskbar included): a full-screen

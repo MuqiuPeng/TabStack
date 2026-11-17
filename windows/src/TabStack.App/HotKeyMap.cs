@@ -27,7 +27,6 @@ static class HotKeyMap
         list.Add(new("search", "Go to workspace…", "Ctrl+Alt+F"));
         list.Add(new("closeWindow", "Close the active window", "Ctrl+Alt+D"));
         list.Add(new("toggleSidebar", "Show or hide the sidebar", "Ctrl+Alt+0"));
-        list.Add(new("toggleTile", "Toggle tiling", ""));
         return list;
     }
 

@@ -293,12 +293,16 @@ public sealed class WorkspaceManager
         Changed?.Invoke();
     }
 
-    /// <summary>Hide a window (or minimize it, for apps that misbehave when hidden).</summary>
+    /// <summary>Hide a window (or minimize it, for apps that misbehave when hidden). Hiding
+    /// leaves the window's position, size, maximized or snapped state alone, so nothing about
+    /// it needs saving: it comes back as it was.</summary>
     void PutAway(long h, string appID)
     {
         hiddenAt[h] = (clock(), appID);
         if (state.Settings.MinimizeApps.Contains(appID, StringComparer.OrdinalIgnoreCase))
         {
+            // Minimizing does change it: remember what to restore.
+            if (platform.GetPlacement(h) is { State: not PlacementState.Minimized } p) minimizedFrom[h] = p;
             platform.Minimize(h);
             return;
         }
@@ -306,9 +310,14 @@ public sealed class WorkspaceManager
         platform.Hide(h);
     }
 
-    /// <summary>Shows a workspace's windows where they were when it was left, in the same
-    /// stacking order, and (when <paramref name="activate"/>) focuses the window that had the
-    /// focus. Windows last seen on another sidebar display are moved onto <paramref name="display"/>.</summary>
+    /// <summary>Windows we minimized instead of hiding, and how they looked before.</summary>
+    readonly Dictionary<long, Placement> minimizedFrom = new();
+
+    /// <summary>Shows a workspace's windows again. They are where they were (hiding doesn't
+    /// move them); only a window on another sidebar display (two displays traded workspaces,
+    /// the workspace now shows elsewhere) or on a monitor that is gone is moved. Then the
+    /// stacking order is restored and (when <paramref name="activate"/>) the window that had
+    /// the focus gets it back.</summary>
     void BringBack(Workspace ws, HashSet<long> windows, MonitorInfo? display, bool activate = true)
     {
         foreach (var h in windows) ledger.Remove(h);
@@ -317,69 +326,80 @@ public sealed class WorkspaceManager
         target ??= ws.LastTabID is { } lt ? ws.Tab(lt) : null;
         if (target?.Hwnd is null) target = ws.Tabs.FirstOrDefault(t => t.Hwnd is not null);
 
-        if (ws.Tiled == true)
-        {
-            foreach (var h in windows) platform.Show(h);
-            if (target is not null) ShowTab(ws, target, activate, display);
-            return;
-        }
-
         var monitors = platform.Monitors();
         var rank = (ws.ZOrder ?? []).Select((id, i) => (id, i)).ToDictionary(x => x.id, x => x.i);
-        var layout = ws.Tabs
-            .Where(t => t.Hwnd is { } h && windows.Contains(h) && t.Placement is not null)
+        // Bottom to top: windows that were not on screen first, then the stack reversed.
+        var stack = ws.Tabs
+            .Where(t => t.Hwnd is { } h && windows.Contains(h))
             .DistinctBy(t => t.Hwnd)
-            // Bottom to top: windows that were not on screen first, then the stack reversed.
             .OrderByDescending(t => rank.TryGetValue(t.Id, out var r) ? r : int.MaxValue)
-            .Select(t => (t.Hwnd!.Value, Place(t.Placement!, monitors, display)))
-            .ToList();
-        var placed = layout.Select(x => x.Item1).ToHashSet();
-        foreach (var h in windows) if (!placed.Contains(h)) platform.Show(h);
-        platform.ApplyLayout(layout);
+            .Select(t => t.Hwnd!.Value).ToList();
 
-        if (activate && target?.Hwnd is { } th && target.Placement?.State != PlacementState.Minimized)
+        var moves = new List<(long, Placement)>();
+        foreach (var h in stack)
+        {
+            if (platform.GetPlacement(h) is not { } live) continue;
+            var restoring = minimizedFrom.Remove(h, out var before);
+            if (restoring) live = before!;
+            var placed = Place(live, monitors, display);
+            if (restoring || !ReferenceEquals(placed, live)) moves.Add((h, placed));
+        }
+        var moved = moves.Select(x => x.Item1).ToHashSet();
+        foreach (var h in windows) if (!moved.Contains(h)) platform.Show(h);
+        if (moves.Count > 0) platform.ApplyLayout(moves);
+        platform.Raise(stack.Where(h => platform.GetPlacement(h)?.State != PlacementState.Minimized).ToList());
+
+        if (activate && target?.Hwnd is { } th && platform.GetPlacement(th)?.State != PlacementState.Minimized)
         {
             ws.LastTabID = target.Id;
             platform.Activate(th);
         }
     }
 
-    /// <summary>Where a saved placement goes now: onto <paramref name="display"/> when it was
-    /// on another display with a sidebar (or one that is gone); otherwise just fitted to the
-    /// current monitors. Windows on monitors without a sidebar stay there.</summary>
+    /// <summary>Where a window goes now: onto <paramref name="display"/> when it sits on another
+    /// display with a sidebar; fitted back on screen when its monitor is gone. Returns the same
+    /// placement object when it can stay where it is. Windows on monitors without a sidebar stay.</summary>
     Placement Place(Placement p, IReadOnlyList<MonitorInfo> monitors, MonitorInfo? display)
     {
         if (display is null || p.Monitor == display.Device) return LayoutMath.Fit(p, monitors);
-        var saved = Monitor(p.Monitor, monitors);
-        if (saved is not null && state.Settings.NoSidebarMonitors.Contains(saved.Device)) return LayoutMath.Fit(p, monitors);
+        var on = Monitor(p.Monitor, monitors);
+        if (on is not null && state.Settings.NoSidebarMonitors.Contains(on.Device)) return LayoutMath.Fit(p, monitors);
         return LayoutMath.Relocate(p, monitors, display);
     }
 
-    /// <summary>Records the placement, stacking order and focus of a workspace's windows.
-    /// Called when leaving it and, debounced, whenever its windows move.</summary>
+    /// <summary>Records the stacking order and focus of a workspace's windows (not their
+    /// placement: Windows keeps that). Called when leaving it and, debounced, when its windows
+    /// change.</summary>
     public void Capture(Workspace ws)
     {
-        var order = platform.EnumerateWindows().Select((w, i) => (w.Hwnd, i))
-            .GroupBy(x => x.Hwnd).ToDictionary(g => g.Key, g => g.First().i);
+        var all = platform.EnumerateWindows();
+        var order = all.Select((w, i) => (w.Hwnd, i)).GroupBy(x => x.Hwnd).ToDictionary(g => g.Key, g => g.First().i);
+        var minimized = all.Where(w => w.Minimized).Select(w => w.Hwnd).ToHashSet();
         var onScreen = ws.Tabs.Where(t => t.Hwnd is { } h && order.ContainsKey(h)).ToList();
-        foreach (var t in onScreen)
-            if (platform.GetPlacement(t.Hwnd!.Value) is { } p) t.Placement = p;
         ws.ZOrder = onScreen.OrderBy(t => order[t.Hwnd!.Value]).Select(t => t.Id).ToList();
         var fg = platform.ForegroundWindow();
         ws.ForegroundTab = ws.Tabs.Find(t => t.Hwnd == fg)?.Id
-            ?? onScreen.Where(t => t.Placement?.Visible == true).OrderBy(t => order[t.Hwnd!.Value]).FirstOrDefault()?.Id;
+            ?? onScreen.Where(t => !minimized.Contains(t.Hwnd!.Value)).OrderBy(t => order[t.Hwnd!.Value]).FirstOrDefault()?.Id;
     }
 
-    /// <summary>Debounced snapshot of the current workspace (windows moved, minimized…).</summary>
+    /// <summary>Debounced snapshot of the workspaces on screen (windows moved, minimized…).
+    /// Also notices snap groups forming or breaking up, which the sidebar shows.</summary>
     public void CaptureCurrent()
     {
         foreach (var ws in Displayed) Capture(ws);
         Save();
+        var groups = string.Join("|", Displayed.Select(ws =>
+            string.Join(",", SnapGroups(ws).OrderBy(kv => kv.Key).Select(kv => kv.Key + ":" + kv.Value))));
+        if (groups == lastGroups) return;
+        lastGroups = groups;
+        Changed?.Invoke();
     }
 
-    /// <summary>Show and focus a tab's window. Free mode: it keeps its own position; tiling
-    /// mode: it fills the work area (a pair splits it). Returns false when the tab has no
-    /// window to show.</summary>
+    string lastGroups = "";
+
+    /// <summary>Show and focus a tab's window, as it is. If it is snapped together with other
+    /// windows of this workspace (Windows snap layouts), the whole group comes to the front.
+    /// Returns false when the tab has no window to show.</summary>
     public bool SelectTab(Guid tabID)
     {
         var ws = Current;
@@ -387,99 +407,88 @@ public sealed class WorkspaceManager
         ws.LastTabID = tab.Id;
         FocusOutside = false;
         var w = Resolve(tab);
-        if (w is not null) ShowTab(ws, tab, activate: true);
+        if (w is not null) ShowTab(ws, tab);
         Save();
         Changed?.Invoke();
         return w is not null;
     }
 
-    void ShowTab(Workspace ws, AppTab tab, bool activate, MonitorInfo? display = null)
+    void ShowTab(Workspace ws, AppTab tab)
     {
         var h = tab.Hwnd!.Value;
         ledger.Remove(h);
-        if (ws.Tiled != true)
+        var group = SnapGroup(ws, h);
+        if (group.Count > 1)
         {
-            if (activate) platform.Activate(h);
-            else platform.Show(h);
-            return;
+            foreach (var g in group) { ledger.Remove(g); platform.Show(g); }
+            platform.Raise(group.Where(g => g != h).ToList());
         }
-        var partner = tab.PairedWith is { } pid ? ws.Tab(pid) : null;
-        var ph = partner is not null ? Resolve(partner)?.Hwnd : null;
-        var work = (display ?? DisplayOf(ws, platform.Monitors()))?.WorkArea ?? platform.WorkArea(h);
-        RememberFree(tab);
-        if (ph is { } p && p != h)
+        platform.Activate(h);
+    }
+
+    // ───────────────────────── Snap groups ─────────────────────────
+
+    /// <summary>Window edges closer than this (physical pixels) touch. Snapped windows leave
+    /// their invisible resize borders (7 px each side at 100 %) between them.</summary>
+    const int Touch = 24;
+
+    /// <summary>The windows of a workspace snapped together with <paramref name="hwnd"/>
+    /// (itself included): snapped (Windows snap layouts, Aero Snap), on the same monitor, each
+    /// touching another along an edge. Windows keeps no public record of its snap groups, so
+    /// this goes by where the windows are; drag one away and it leaves the group.</summary>
+    public List<long> SnapGroup(Workspace ws, long hwnd) =>
+        Groups(ws).FirstOrDefault(g => g.Contains(hwnd)) ?? [hwnd];
+
+    /// <summary>Tab id → group number, for tabs whose window is in a group of two or more.</summary>
+    public Dictionary<Guid, int> SnapGroups(Workspace ws)
+    {
+        var result = new Dictionary<Guid, int>();
+        var i = 0;
+        foreach (var g in Groups(ws).Where(g => g.Count > 1))
         {
-            RememberFree(partner!);
-            // The member listed first goes on the left, whichever of the two was clicked.
-            var left = ws.Tabs.IndexOf(tab) < ws.Tabs.IndexOf(partner!);
-            ledger.Remove(p);
-            platform.MoveTo(h, LayoutMath.Tile(work, left ? -1 : 1));
-            platform.MoveTo(p, LayoutMath.Tile(work, left ? 1 : -1));
-            if (activate) platform.Activate(p);
-            else platform.Show(p);
+            foreach (var t in ws.Tabs.Where(t => t.Hwnd is { } h && g.Contains(h))) result[t.Id] = i;
+            i++;
         }
-        else platform.MoveTo(h, work);
-        if (activate) platform.Activate(h);
-        else platform.Show(h);
+        return result;
     }
 
-    /// <summary>Before tiling first moves a window, keep where it was and how big.</summary>
-    void RememberFree(AppTab tab)
+    List<List<long>> Groups(Workspace ws)
     {
-        if (tab.FreePlacement is not null || tab.Hwnd is not { } h) return;
-        tab.FreePlacement = platform.GetPlacement(h) ?? tab.Placement;
-    }
-
-    public void SetTiled(Guid id, bool tiled)
-    {
-        if (!tiled && Find(id) is { } ws) Untile(ws);
-        Edit(id, w => w.Tiled = tiled ? true : null);
-        if (tiled && id == Current.Id && Current.LastTabID is { } t) SelectTab(t);
-    }
-
-    /// <summary>Tiling off: every window it moved gets its own placement back (on screen now
-    /// if the workspace is shown, otherwise the next time it is).</summary>
-    void Untile(Workspace ws)
-    {
-        var shown = Displayed.Any(w => w.Id == ws.Id);
-        var monitors = platform.Monitors();
-        var layout = new List<(long, Placement)>();
-        foreach (var t in ws.Tabs)
+        var snapped = ws.Tabs.Select(t => t.Hwnd).OfType<long>().Distinct()
+            .Select(h => (h, p: platform.GetPlacement(h)))
+            .Where(x => x.p is { State: PlacementState.Snapped })
+            .Select(x => (h: x.h, r: x.p!.ActualRect, m: x.p.Monitor)).ToList();
+        var groups = new List<List<long>>();
+        var seen = new HashSet<long>();
+        foreach (var start in snapped)
         {
-            if (t.FreePlacement is not { } free) continue;
-            t.Placement = free;
-            t.FreePlacement = null;
-            if (shown && t.Hwnd is { } h && platform.GetPlacement(h) is { Visible: true })
-                layout.Add((h, LayoutMath.Fit(free, monitors)));
+            if (!seen.Add(start.h)) continue;
+            var group = new List<long> { start.h };
+            var queue = new Queue<(long h, Rect r, string? m)>();
+            queue.Enqueue(start);
+            while (queue.Count > 0)
+            {
+                var a = queue.Dequeue();
+                foreach (var b in snapped)
+                {
+                    if (seen.Contains(b.h) || b.m != a.m || !Touching(a.r, b.r)) continue;
+                    seen.Add(b.h);
+                    group.Add(b.h);
+                    queue.Enqueue(b);
+                }
+            }
+            groups.Add(group);
         }
-        if (layout.Count > 0)
-        {
-            platform.ApplyLayout(layout);
-            // Restoring the placements changed the stacking: the selected window stays on top.
-            if (ws.LastTabID is { } lt && ws.Tab(lt)?.Hwnd is { } top && layout.Any(x => x.Item1 == top)) platform.Activate(top);
-        }
+        return groups;
     }
 
-    /// <summary>Shows two tabs side by side in tiling mode.</summary>
-    public void Pair(Guid a, Guid b)
+    static bool Touching(Rect a, Rect b)
     {
-        if (a == b || Current.Tab(a) is not { } ta || Current.Tab(b) is not { } tb) return;
-        Unpair(a, save: false);
-        Unpair(b, save: false);
-        ta.PairedWith = b;
-        tb.PairedWith = a;
-        if (Current.Tiled == true) SelectTab(a);
-        else { Save(); Changed?.Invoke(); }
-    }
-
-    public void Unpair(Guid a, bool save = true)
-    {
-        if (Current.Tab(a) is not { } ta) return;
-        if (ta.PairedWith is { } b && Current.Tab(b) is { } tb) tb.PairedWith = null;
-        ta.PairedWith = null;
-        if (!save) return;
-        Save();
-        Changed?.Invoke();
+        static bool Near(int x, int y) => Math.Abs(x - y) <= Touch;
+        static bool Spans(int a0, int a1, int b0, int b1) => Math.Min(a1, b1) - Math.Max(a0, b0) > Touch;
+        var side = (Near(a.Right(), b.X) || Near(b.Right(), a.X)) && Spans(a.Y, a.Bottom(), b.Y, b.Bottom());
+        var stacked = (Near(a.Bottom(), b.Y) || Near(b.Bottom(), a.Y)) && Spans(a.X, a.Right(), b.X, b.Right());
+        return side || stacked;
     }
 
     /// <summary>A window was destroyed. One that dies right after we hid it belongs to an app
@@ -594,7 +603,6 @@ public sealed class WorkspaceManager
     {
         var ws = Current;
         if (ws.LastTabID != tabID || ws.Tab(tabID) is not { } cur || platform.Describe(closed) is not null) return;
-        if (cur.PairedWith is { } pid && ws.Tab(pid)?.Hwnd is { } ph && platform.Describe(ph) is not null) return;
         var fg = platform.ForegroundWindow();
         if (ws.Tabs.Any(t => t.Hwnd == fg)) { OnForeground(fg); return; }
         var i = ws.Tabs.IndexOf(cur);
@@ -633,7 +641,7 @@ public sealed class WorkspaceManager
     {
         var used = state.Workspaces.Select(w => w.Color ?? 0).ToHashSet();
         var color = Enumerable.Range(0, Palette.Length).FirstOrDefault(i => !used.Contains(i), state.Workspaces.Count % Palette.Length);
-        var ws = new Workspace { Name = name, Color = color, Usage = [clock()], Tiled = state.Settings.TileNewWorkspaces ? true : null };
+        var ws = new Workspace { Name = name, Color = color, Usage = [clock()] };
         state.Workspaces.Add(ws);
         RecomputeActive();
         Save();
@@ -781,7 +789,6 @@ public sealed class WorkspaceManager
         target.Tabs.Add(tab);
         if (tab.Hwnd is { } h && !Current.Tabs.Any(t => t.Hwnd == h) && platform.Describe(h) is { Locked: false } info)
         {
-            if (platform.GetPlacement(h) is { } p) tab.Placement = p;
             // The target is on screen on another display: move the window there instead.
             if (DisplayShowing(targetID) is { } d && Monitor(d, platform.Monitors()) is { } there)
                 BringBack(target, [h], there, activate: false);

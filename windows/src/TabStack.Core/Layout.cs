@@ -89,12 +89,4 @@ public static class LayoutMath
             Visible = p.Visible,
         };
     }
-
-    /// <summary>Tiling: the whole work area, or its left/right half for a pair.</summary>
-    public static Rect Tile(Rect work, int side) => side switch
-    {
-        < 0 => new Rect(work.X, work.Y, work.W / 2, work.H),
-        > 0 => new Rect(work.X + work.W / 2, work.Y, work.W - work.W / 2, work.H),
-        _ => work,
-    };
 }

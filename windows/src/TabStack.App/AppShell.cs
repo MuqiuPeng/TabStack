@@ -199,7 +199,6 @@ public sealed class AppShell
             case "search": panels.Search(); break;
             case "closeWindow": CloseForeground(); break;
             case "toggleSidebar": ToggleSidebars(); break;
-            case "toggleTile": m.SetTiled(m.Current.Id, m.Current.Tiled != true); break;
         }
     }
 

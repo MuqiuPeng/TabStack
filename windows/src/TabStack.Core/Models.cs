@@ -20,7 +20,6 @@ public sealed class AppTab
     /// <summary>Last seen window title, for display and re-binding.</summary>
     public string? Title { get; set; }
     public Reopen? Reopen { get; set; }
-    public Guid? PairedWith { get; set; }
     /// <summary>The window is also a tab in other workspaces.</summary>
     public bool? Shared { get; set; }
 
@@ -31,10 +30,6 @@ public sealed class AppTab
     public string? ExePath { get; set; }
     /// <summary>Window class, used for re-binding.</summary>
     public string? ClassName { get; set; }
-    public Placement? Placement { get; set; }
-    /// <summary>The window's own placement from before tiling moved it; put back when tiling
-    /// is turned off, so tiling never costs a window the size and position it had.</summary>
-    public Placement? FreePlacement { get; set; }
     public bool? NoSleep { get; set; }
 
     [JsonIgnore]
@@ -116,9 +111,6 @@ public sealed class Workspace
     public Guid? ForegroundTab { get; set; }
     public SleepState? Sleep { get; set; }
     public bool? NoSleep { get; set; }
-    /// <summary>Tiling mode (as on the Mac): a selected tab fills the work area beside the
-    /// sidebar, a pair splits it. Otherwise windows keep their own placement.</summary>
-    public bool? Tiled { get; set; }
 
     public AppTab? Tab(Guid id) => Tabs.Find(t => t.Id == id);
 }
@@ -149,8 +141,6 @@ public sealed class Settings
     public List<string> MinimizeApps { get; set; } = new();
     /// <summary>Hotkey overrides: action id → chord such as "Ctrl+Alt+Left"; "" disables.</summary>
     public Dictionary<string, string> HotKeys { get; set; } = new();
-    /// <summary>New workspaces start in tiling mode.</summary>
-    public bool TileNewWorkspaces { get; set; }
     /// <summary>Monitors (by id) that get no sidebar and show no workspace of their own;
     /// windows there belong to whichever workspace they are tabs of.</summary>
     public List<string> NoSidebarMonitors { get; set; } = new();

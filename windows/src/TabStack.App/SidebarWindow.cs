@@ -178,7 +178,8 @@ sealed class SidebarWindow : Window
         workspaceButton.ToolTip = $"Workspace: {ws.Name} (click to switch)";
         workspaceButton.Style = FlatStyle();
 
-        foreach (var tab in ws.Tabs) tabsPanel.Children.Add(TabButton(ws, tab));
+        var groups = M.SnapGroups(ws);
+        foreach (var tab in ws.Tabs) tabsPanel.Children.Add(TabButton(ws, tab, groups));
     }
 
     static Brush Frozen(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
@@ -198,7 +199,7 @@ sealed class SidebarWindow : Window
         },
     };
 
-    FrameworkElement TabButton(Workspace ws, AppTab tab)
+    FrameworkElement TabButton(Workspace ws, AppTab tab, Dictionary<Guid, int> groups)
     {
         var info = tab.Hwnd is { } h ? shell.Platform.Describe(h) : null;
         // The focused workspace's tab is lit only while its window has the focus.
@@ -234,14 +235,25 @@ sealed class SidebarWindow : Window
         grid.Children.Add(glyph);
         if (info?.Locked == true)
             grid.Children.Add(new TextBlock { Text = "🔒", FontSize = 10, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 6, 4) });
-        if (tab.PairedWith is not null)
-            grid.Children.Add(new TextBlock { Text = "◫", FontSize = 10, Foreground = Foreground0, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(6, 0, 0, 4) });
+        // Snapped together with other windows here (Windows snap layouts): they come forward together.
+        string? snapped = null;
+        if (groups.TryGetValue(tab.Id, out var group))
+        {
+            var many = groups.Values.Distinct().Count() > 1;
+            grid.Children.Add(new TextBlock
+            {
+                Text = many ? $"⊞{group + 1}" : "⊞", FontSize = 10, Foreground = Foreground0,
+                HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(6, 0, 0, 4),
+            });
+            snapped = string.Join(", ", ws.Tabs.Where(t => t.Id != tab.Id && groups.TryGetValue(t.Id, out var g) && g == group).Select(t => t.DisplayName));
+        }
         if (tab.Shared == true)
             grid.Children.Add(new TextBlock { Text = "⧉", FontSize = 10, Foreground = Foreground0, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 4, 6, 0) });
 
         var tip = tab.DisplayName;
         if (info is null) tip += "\n(Window not open: click to find it by title, or launch the app)";
         if (info?.Locked == true) tip += "\n(Running as administrator: TabStack can't hide it)";
+        if (snapped is not null) tip += "\nSnapped with: " + snapped;
         var b = new Button
         {
             Content = grid, ToolTip = tip, Margin = new Thickness(4, 2, 4, 2), Style = FlatStyle(selected),
@@ -413,15 +425,6 @@ sealed class SidebarWindow : Window
             move.Items.Add(Item(ws.Name, () => M.MoveTabToWorkspace(tab.Id, ws.Id), icon: WorkspaceBadge(ws, 16)));
         move.IsEnabled = move.Items.Count > 0;
         menu.Items.Add(move);
-        var others = M.Current.Tabs.Where(t => t.Id != tab.Id).ToList();
-        if (tab.PairedWith is not null)
-            menu.Items.Add(Item("Unpair", () => M.Unpair(tab.Id)));
-        else if (others.Count > 0)
-        {
-            var pair = new MenuItem { Header = "Pair With (side by side when tiling)" };
-            foreach (var o in others) pair.Items.Add(Item(Short(o.DisplayName), () => M.Pair(tab.Id, o.Id)));
-            menu.Items.Add(pair);
-        }
         var i = M.Current.Tabs.FindIndex(t => t.Id == tab.Id);
         menu.Items.Add(Item("Move Up", () => M.MoveTab(tab.Id, i - 1), enabled: i > 0));
         menu.Items.Add(Item("Move Down", () => M.MoveTab(tab.Id, i + 1), enabled: i < M.Current.Tabs.Count - 1));
@@ -449,7 +452,6 @@ sealed class SidebarWindow : Window
         }
         menu.Items.Add(colors);
         menu.Items.Add(Item("Pin to Sidebar", () => M.SetPinned(ws.Id, ws.Pinned != true), check: ws.Pinned == true));
-        menu.Items.Add(Item("Tile Windows (fill the space beside the sidebar)", () => M.SetTiled(ws.Id, ws.Tiled != true), check: ws.Tiled == true));
         var idx = M.Workspaces.ToList().FindIndex(w => w.Id == ws.Id);
         menu.Items.Add(Item("Move Workspace Up", () => M.MoveWorkspace(ws.Id, idx - 1), enabled: idx > 0));
         menu.Items.Add(Item("Move Workspace Down", () => M.MoveWorkspace(ws.Id, idx + 1), enabled: idx < M.Workspaces.Count - 1));

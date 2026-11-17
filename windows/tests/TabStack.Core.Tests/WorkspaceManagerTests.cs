@@ -221,7 +221,7 @@ public sealed class WorkspaceManagerTests : IDisposable
     [Fact]
     public void LedgerForgetsWindowsClosedWhileHidden()
     {
-        var a = os.Open(@"c:.exe", "A");
+        var a = os.Open(@"c:\a.exe", "A");
         var ledger = Ledger();
         var m = Manager(ledger);
         m.AddWindow(Info(a));
@@ -232,7 +232,7 @@ public sealed class WorkspaceManagerTests : IDisposable
     }
 
     [Fact]
-    public void ReturningRestoresPlacementStackingAndFocus()
+    public void ReturningRestoresStackingAndFocusButNotPlacement()
     {
         var a = os.Open(@"c:\a.exe", "A");
         var b = os.Open(@"c:\b.exe", "B");
@@ -247,15 +247,15 @@ public sealed class WorkspaceManagerTests : IDisposable
         m.OnForeground(b.Hwnd);
 
         m.SwitchWorkspace(m.CreateWorkspace("X").Id);
-        // Meanwhile something else moves them around.
-        a.Rect = new Rect(0, 0, 10, 10); b.State = PlacementState.Normal;
+        // Meanwhile the user (or the app) changes them: that is how they come back.
+        a.Rect = new Rect(300, 60, 500, 300); b.State = PlacementState.Normal;
         m.SwitchWorkspace(home.Id);
 
-        Assert.Equal(new Rect(200, 50, 600, 400), a.Rect);
-        Assert.Equal(PlacementState.Maximized, b.State);
+        Assert.Equal(new Rect(300, 60, 500, 300), a.Rect);
+        Assert.Equal(PlacementState.Normal, b.State);
         Assert.Equal(PlacementState.Minimized, c.State);
         Assert.Equal(b.Hwnd, os.Foreground);
-        Assert.Equal([a.Hwnd, c.Hwnd, b.Hwnd], os.LastLayout); // bottom to top
+        Assert.Equal([a.Hwnd, b.Hwnd], os.LastRaise); // bottom to top, minimized left out
     }
 
     [Fact]
@@ -296,79 +296,112 @@ public sealed class WorkspaceManagerTests : IDisposable
     }
 
     [Fact]
-    public void TilingFillsWorkAreaAndSplitsPairs()
+    public void SwitchingBackLeavesWindowsAsTheyAre()
+    {
+        var a = os.Open(@"c:\a.exe", "A");
+        a.Rect = new Rect(300, 200, 640, 480);
+        var m = Manager();
+        var home = m.Current;
+        m.AddWindow(Info(a));
+        var other = m.CreateWorkspace("Other");
+        m.SwitchWorkspace(other.Id);
+        // The window changed while it was out of sight (the app resized itself, say):
+        // coming back does not undo that.
+        a.Rect = new Rect(100, 100, 900, 700);
+        os.LastLayout.Clear();
+        m.SwitchWorkspace(home.Id);
+        Assert.True(os.Get(a.Hwnd).Visible);
+        Assert.Equal(new Rect(100, 100, 900, 700), a.Rect);
+        Assert.Empty(os.LastLayout); // nothing was placed
+        Assert.Equal(a.Hwnd, os.Foreground);
+    }
+
+    [Fact]
+    public void StackingOrderComesBack()
     {
         var a = os.Open(@"c:\a.exe", "A");
         var b = os.Open(@"c:\b.exe", "B");
         var m = Manager();
-        var ta = m.AddWindow(Info(a));
-        var tb = m.AddWindow(Info(b));
-        m.SetTiled(m.Current.Id, true);
-        var work = os.MonitorList[0].WorkArea;
-        m.SelectTab(ta.Id);
-        Assert.Equal(work, a.Rect);
-
-        m.Pair(ta.Id, tb.Id);
-        m.SelectTab(tb.Id);
-        Assert.Equal(LayoutMath.Tile(work, -1), a.Rect);
-        Assert.Equal(LayoutMath.Tile(work, 1), b.Rect);
-        Assert.Equal(b.Hwnd, os.Foreground);
-
-        m.Unpair(ta.Id);
-        Assert.Null(tb.PairedWith);
-    }
-
-    [Fact]
-    public void TurningTilingOffGivesWindowsTheirOwnSizeBack()
-    {
-        var a = os.Open(@"c:.exe", "A");
-        a.Rect = new Rect(300, 200, 640, 480);
-        var b = os.Open(@"c:.exe", "B");
-        b.Rect = new Rect(500, 250, 800, 600);
-        var m = Manager();
-        var ta = m.AddWindow(Info(a));
-        var tb = m.AddWindow(Info(b));
-        m.SetTiled(m.Current.Id, true);
-        m.SelectTab(ta.Id);
-        m.Pair(ta.Id, tb.Id);
-        m.SelectTab(tb.Id);
-        Assert.NotEqual(new Rect(300, 200, 640, 480), a.Rect);
-
-        m.SetTiled(m.Current.Id, false);
-        Assert.Equal(new Rect(300, 200, 640, 480), a.Rect);
-        Assert.Equal(new Rect(500, 250, 800, 600), b.Rect);
-        Assert.Null(ta.FreePlacement);
-
-        // Free mode: choosing a tab leaves its window where it is.
-        m.SelectTab(ta.Id);
-        Assert.Equal(new Rect(300, 200, 640, 480), a.Rect);
-    }
-
-    [Fact]
-    public void TilingOffWhileAwayRestoresOnReturn()
-    {
-        var a = os.Open(@"c:.exe", "A");
-        a.Rect = new Rect(300, 200, 640, 480);
-        var m = Manager();
-        var ws = m.Current;
-        var ta = m.AddWindow(Info(a));
-        m.SetTiled(ws.Id, true);
-        m.SelectTab(ta.Id);
+        var home = m.Current;
+        m.AddWindow(Info(a));
+        m.AddWindow(Info(b));
+        os.Activate(a.Hwnd); // a on top
         var other = m.CreateWorkspace("Other");
         m.SwitchWorkspace(other.Id);
-        m.SetTiled(ws.Id, false);
-        m.SwitchWorkspace(ws.Id);
-        Assert.Equal(new Rect(300, 200, 640, 480), a.Rect);
+        m.SwitchWorkspace(home.Id);
+        Assert.Equal([b.Hwnd, a.Hwnd], os.LastRaise);
+        Assert.Equal(a.Hwnd, os.Windows[0].Hwnd);
     }
 
     [Fact]
-    public void MovingWindowsUpdatesTheSnapshot()
+    public void AppsMinimizedInsteadOfHiddenComeBackMaximized()
     {
         var a = os.Open(@"c:\a.exe", "A");
+        a.State = PlacementState.Maximized;
+        var m = Manager();
+        var home = m.Current;
+        m.AddWindow(Info(a));
+        m.UpdateSettings(s => s.MinimizeApps.Add(@"c:\a.exe"));
+        var other = m.CreateWorkspace("Other");
+        m.SwitchWorkspace(other.Id);
+        Assert.Equal(PlacementState.Minimized, os.Get(a.Hwnd).State);
+        m.SwitchWorkspace(home.Id);
+        Assert.Equal(PlacementState.Maximized, os.Get(a.Hwnd).State);
+    }
+
+    /// <summary>Two windows snapped side by side (left and right half) and a third elsewhere.</summary>
+    (WorkspaceManager m, AppTab ta, AppTab tb, AppTab tc, FakePlatform.Win a, FakePlatform.Win b, FakePlatform.Win c) Snapped()
+    {
+        var a = os.Open(@"c:\a.exe", "A");
+        var b = os.Open(@"c:\b.exe", "B");
+        var c = os.Open(@"c:\c.exe", "C");
+        // Window rects include the 7 px invisible borders, so snapped neighbours overlap a little.
+        a.Rect = new Rect(57, 0, 942, 1047);
+        a.State = PlacementState.Snapped;
+        b.Rect = new Rect(985, 0, 942, 1047);
+        b.State = PlacementState.Snapped;
+        c.Rect = new Rect(300, 200, 640, 480);
         var m = Manager();
         var ta = m.AddWindow(Info(a));
-        a.Rect = new Rect(1, 2, 300, 400);
-        m.CaptureCurrent();
-        Assert.Equal(new Rect(1, 2, 300, 400), Manager().Current.Tab(ta.Id)!.Placement!.NormalRect);
+        var tb = m.AddWindow(Info(b));
+        var tc = m.AddWindow(Info(c));
+        return (m, ta, tb, tc, a, b, c);
+    }
+
+    [Fact]
+    public void SnappedNeighboursFormAGroup()
+    {
+        var (m, ta, tb, tc, a, b, c) = Snapped();
+        var groups = m.SnapGroups(m.Current);
+        Assert.Equal(groups[ta.Id], groups[tb.Id]);
+        Assert.False(groups.ContainsKey(tc.Id));
+        Assert.Equal(2, m.SnapGroup(m.Current, a.Hwnd).Count);
+        Assert.Single(m.SnapGroup(m.Current, c.Hwnd));
+    }
+
+    [Fact]
+    public void SelectingASnappedTabBringsItsGroupForward()
+    {
+        var (m, ta, _, tc, a, b, c) = Snapped();
+        m.SelectTab(tc.Id);
+        Assert.Equal(c.Hwnd, os.Windows[0].Hwnd);
+        m.SelectTab(ta.Id);
+        Assert.Equal(a.Hwnd, os.Foreground);
+        Assert.Contains(b.Hwnd, os.LastRaise);
+        // Both halves are above the third window, and nobody was moved.
+        var order = os.Windows.Select(w => w.Hwnd).ToList();
+        Assert.True(order.IndexOf(b.Hwnd) < order.IndexOf(c.Hwnd));
+        Assert.Equal(new Rect(985, 0, 942, 1047), b.Rect);
+    }
+
+    [Fact]
+    public void DraggingAWindowAwayLeavesTheGroup()
+    {
+        var (m, ta, tb, _, _, b, _) = Snapped();
+        b.Rect = new Rect(1200, 300, 600, 500);
+        b.State = PlacementState.Normal;
+        var groups = m.SnapGroups(m.Current);
+        Assert.False(groups.ContainsKey(ta.Id));
+        Assert.False(groups.ContainsKey(tb.Id));
     }
 }
