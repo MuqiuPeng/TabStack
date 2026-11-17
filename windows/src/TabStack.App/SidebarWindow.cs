@@ -56,16 +56,16 @@ sealed class SidebarWindow : Window
         Top = monitor.Bounds.Y * 96.0 / Math.Max(monitor.Dpi, 96);
         Height = monitor.Bounds.H * 96.0 / Math.Max(monitor.Dpi, 96);
 
-        workspaceButton = new Button { Height = 56, Margin = new Thickness(4, 8, 4, 4), ToolTip = "工作区" };
+        workspaceButton = new Button { Height = 56, Margin = new Thickness(4, 8, 4, 4), ToolTip = "Workspace" };
         workspaceButton.Click += (_, _) =>
         {
             if (M.WorkspaceOn(Device) is null) NewWorkspaceHere();
             else OpenMenu(workspaceButton, WorkspaceMenu());
         };
 
-        var add = IconButton("＋", "添加窗口到当前工作区");
+        var add = IconButton("＋", "Add a window to this workspace");
         add.Click += (_, _) => OpenMenu(add, AddMenu());
-        var gear = IconButton("⚙", "工作区与设置");
+        var gear = IconButton("⚙", "Workspace & Settings");
         gear.Click += (_, _) => OpenMenu(gear, SettingsMenu());
 
         var bottom = new StackPanel { Margin = new Thickness(0, 4, 0, 8) };
@@ -150,14 +150,14 @@ sealed class SidebarWindow : Window
         {
             // More displays than workspaces.
             workspaceButton.Content = new TextBlock { Text = "＋", FontSize = 22, Foreground = Foreground0 };
-            workspaceButton.ToolTip = "这块屏幕还没有工作区（点击新建）";
+            workspaceButton.ToolTip = "No workspace on this display (click to create one)";
             workspaceButton.Style = FlatStyle();
             focusMark.Background = Brushes.Transparent;
             return;
         }
         focusMark.Background = focused && shell.ManySidebars ? WorkspaceBrush(ws) : Brushes.Transparent;
         workspaceButton.Content = WorkspaceBadge(ws, 40);
-        workspaceButton.ToolTip = $"工作区：{ws.Name}（点击切换）";
+        workspaceButton.ToolTip = $"Workspace: {ws.Name} (click to switch)";
         workspaceButton.Style = FlatStyle();
 
         foreach (var tab in ws.Tabs) tabsPanel.Children.Add(TabButton(ws, tab));
@@ -207,8 +207,8 @@ sealed class SidebarWindow : Window
             grid.Children.Add(new TextBlock { Text = "⧉", FontSize = 10, Foreground = Foreground0, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 4, 6, 0) });
 
         var tip = tab.DisplayName;
-        if (info is null) tip += "\n（窗口未打开：点击时按标题重新寻找，找不到就启动应用）";
-        if (info?.Locked == true) tip += "\n（以管理员身份运行：TabStack 无法隐藏它）";
+        if (info is null) tip += "\n(Window not open: click to find it by title, or launch the app)";
+        if (info?.Locked == true) tip += "\n(Running as administrator: TabStack can't hide it)";
         var b = new Button
         {
             Content = grid, ToolTip = tip, Margin = new Thickness(4, 2, 4, 2), Style = FlatStyle(selected),
@@ -300,12 +300,12 @@ sealed class SidebarWindow : Window
         var stored = M.Search("").Where(w => !M.ActiveIDs.Contains(w.Id)).ToList();
         if (stored.Count > 0)
         {
-            var more = new MenuItem { Header = $"其他工作区（{stored.Count}）" };
+            var more = new MenuItem { Header = $"Other Workspaces ({stored.Count})" };
             foreach (var ws in stored) more.Items.Add(WorkspaceItem(ws));
             menu.Items.Add(more);
         }
         menu.Items.Add(new Separator());
-        menu.Items.Add(Item("新建工作区…", NewWorkspace));
+        menu.Items.Add(Item("New Workspace…", NewWorkspace));
         return menu;
     }
 
@@ -316,15 +316,15 @@ sealed class SidebarWindow : Window
         if (index is >= 0 and < 9) mi.InputGestureText = $"Ctrl+Alt+{index + 1}";
         if (M.DisplayShowing(ws.Id) is not null)
         {
-            mi.Header = ws.Name + "（另一块屏幕）";
-            mi.ToolTip = "显示在另一块屏幕上，选择后两块屏幕交换工作区";
+            mi.Header = ws.Name + " (other display)";
+            mi.ToolTip = "Shown on the other display; choosing it swaps the two displays' workspaces";
         }
         return mi;
     }
 
     void NewWorkspace()
     {
-        var name = InputDialog.Ask("新建工作区", "名称：", $"工作区 {M.Workspaces.Count + 1}");
+        var name = InputDialog.Ask("New Workspace", "Name:", $"Workspace {M.Workspaces.Count + 1}");
         if (string.IsNullOrWhiteSpace(name)) return;
         M.SwitchWorkspace(M.CreateWorkspace(name.Trim()).Id);
     }
@@ -332,7 +332,7 @@ sealed class SidebarWindow : Window
     /// <summary>A display with no workspace (more displays than workspaces) gets a new one.</summary>
     void NewWorkspaceHere()
     {
-        var name = InputDialog.Ask("新建工作区", "名称：", $"工作区 {M.Workspaces.Count + 1}");
+        var name = InputDialog.Ask("New Workspace", "Name:", $"Workspace {M.Workspaces.Count + 1}");
         if (string.IsNullOrWhiteSpace(name)) return;
         M.CreateWorkspace(name.Trim());
         M.AssignDisplays();
@@ -357,7 +357,7 @@ sealed class SidebarWindow : Window
             foreach (var w in g) sub.Items.Add(Item(Short(w.Title), () => M.AddWindow(w)));
             menu.Items.Add(sub);
         }
-        if (menu.Items.Count == 0) menu.Items.Add(Item("没有其他打开的窗口", null, enabled: false));
+        if (menu.Items.Count == 0) menu.Items.Add(Item("No other open windows", null, enabled: false));
         return menu;
     }
 
@@ -366,34 +366,34 @@ sealed class SidebarWindow : Window
     ContextMenu TabMenu(AppTab tab)
     {
         var menu = new ContextMenu();
-        menu.Items.Add(Item("重命名…", () =>
+        menu.Items.Add(Item("Rename…", () =>
         {
-            var name = InputDialog.Ask("重命名标签", "名称（留空则显示窗口标题）：", tab.CustomName ?? tab.DisplayName);
+            var name = InputDialog.Ask("Rename Tab", "Name (empty shows the window title):", tab.CustomName ?? tab.DisplayName);
             if (name is not null) M.RenameTab(tab.Id, name);
         }));
-        var bind = new MenuItem { Header = "绑定到窗口" };
+        var bind = new MenuItem { Header = "Bind to Window" };
         foreach (var w in shell.Platform.EnumerateWindows().OrderBy(w => w.AppID != tab.AppID).Take(30))
             bind.Items.Add(Item($"{w.AppName} — {Short(w.Title)}", () => M.BindTab(tab.Id, w), check: w.Hwnd == tab.Hwnd));
         menu.Items.Add(bind);
-        var move = new MenuItem { Header = "移到工作区" };
+        var move = new MenuItem { Header = "Move to Workspace" };
         foreach (var ws in M.Workspaces.Where(w => w.Id != M.Current.Id))
             move.Items.Add(Item(ws.Name, () => M.MoveTabToWorkspace(tab.Id, ws.Id), icon: WorkspaceBadge(ws, 16)));
         move.IsEnabled = move.Items.Count > 0;
         menu.Items.Add(move);
         var others = M.Current.Tabs.Where(t => t.Id != tab.Id).ToList();
         if (tab.PairedWith is not null)
-            menu.Items.Add(Item("取消并排", () => M.Unpair(tab.Id)));
+            menu.Items.Add(Item("Unpair", () => M.Unpair(tab.Id)));
         else if (others.Count > 0)
         {
-            var pair = new MenuItem { Header = "与…并排（平铺模式下左右分屏）" };
+            var pair = new MenuItem { Header = "Pair With (side by side when tiling)" };
             foreach (var o in others) pair.Items.Add(Item(Short(o.DisplayName), () => M.Pair(tab.Id, o.Id)));
             menu.Items.Add(pair);
         }
         var i = M.Current.Tabs.FindIndex(t => t.Id == tab.Id);
-        menu.Items.Add(Item("上移", () => M.MoveTab(tab.Id, i - 1), enabled: i > 0));
-        menu.Items.Add(Item("下移", () => M.MoveTab(tab.Id, i + 1), enabled: i < M.Current.Tabs.Count - 1));
+        menu.Items.Add(Item("Move Up", () => M.MoveTab(tab.Id, i - 1), enabled: i > 0));
+        menu.Items.Add(Item("Move Down", () => M.MoveTab(tab.Id, i + 1), enabled: i < M.Current.Tabs.Count - 1));
         menu.Items.Add(new Separator());
-        menu.Items.Add(Item("从工作区移除", () => M.RemoveTab(tab.Id)));
+        menu.Items.Add(Item("Remove from Workspace", () => M.RemoveTab(tab.Id)));
         return menu;
     }
 
@@ -401,13 +401,13 @@ sealed class SidebarWindow : Window
     {
         var ws = M.Current;
         var menu = new ContextMenu();
-        menu.Items.Add(Item("新建工作区…", NewWorkspace));
-        menu.Items.Add(Item($"重命名“{ws.Name}”…", () =>
+        menu.Items.Add(Item("New Workspace…", NewWorkspace));
+        menu.Items.Add(Item($"Rename “{ws.Name}”…", () =>
         {
-            var name = InputDialog.Ask("重命名工作区", "名称：", ws.Name);
+            var name = InputDialog.Ask("Rename Workspace", "Name:", ws.Name);
             if (!string.IsNullOrWhiteSpace(name)) M.RenameWorkspace(ws.Id, name.Trim());
         }));
-        var colors = new MenuItem { Header = "颜色" };
+        var colors = new MenuItem { Header = "Color" };
         for (var c = 0; c < WorkspaceManager.Palette.Length; c++)
         {
             var color = c;
@@ -415,20 +415,20 @@ sealed class SidebarWindow : Window
                 icon: new Border { Width = 14, Height = 14, CornerRadius = new CornerRadius(3), Background = WorkspaceBrush(new Workspace { Color = c }) }));
         }
         menu.Items.Add(colors);
-        menu.Items.Add(Item("固定在侧边栏", () => M.SetPinned(ws.Id, ws.Pinned != true), check: ws.Pinned == true));
-        menu.Items.Add(Item("平铺模式（标签铺满侧边栏右侧）", () => M.SetTiled(ws.Id, ws.Tiled != true), check: ws.Tiled == true));
+        menu.Items.Add(Item("Pin to Sidebar", () => M.SetPinned(ws.Id, ws.Pinned != true), check: ws.Pinned == true));
+        menu.Items.Add(Item("Tile Windows (fill the space beside the sidebar)", () => M.SetTiled(ws.Id, ws.Tiled != true), check: ws.Tiled == true));
         var idx = M.Workspaces.ToList().FindIndex(w => w.Id == ws.Id);
-        menu.Items.Add(Item("上移工作区", () => M.MoveWorkspace(ws.Id, idx - 1), enabled: idx > 0));
-        menu.Items.Add(Item("下移工作区", () => M.MoveWorkspace(ws.Id, idx + 1), enabled: idx < M.Workspaces.Count - 1));
-        menu.Items.Add(Item($"删除“{ws.Name}”…", () =>
+        menu.Items.Add(Item("Move Workspace Up", () => M.MoveWorkspace(ws.Id, idx - 1), enabled: idx > 0));
+        menu.Items.Add(Item("Move Workspace Down", () => M.MoveWorkspace(ws.Id, idx + 1), enabled: idx < M.Workspaces.Count - 1));
+        menu.Items.Add(Item($"Delete “{ws.Name}”…", () =>
         {
-            if (MessageBox.Show($"删除工作区“{ws.Name}”？其中的窗口不会被关闭。", "TabStack", MessageBoxButton.OKCancel, MessageBoxImage.Warning) == MessageBoxResult.OK)
+            if (MessageBox.Show($"Delete workspace “{ws.Name}”? Its windows stay open.", "TabStack", MessageBoxButton.OKCancel, MessageBoxImage.Warning) == MessageBoxResult.OK)
                 M.DeleteWorkspace(ws.Id);
         }, enabled: M.Workspaces.Count > 1));
         menu.Items.Add(new Separator());
-        menu.Items.Add(Item("显示所有隐藏的窗口", () => shell.ShowAllHidden()));
-        menu.Items.Add(Item("设置…", shell.OpenSettings));
-        menu.Items.Add(Item("退出 TabStack", shell.Quit));
+        menu.Items.Add(Item("Show All Hidden Windows", () => shell.ShowAllHidden()));
+        menu.Items.Add(Item("Settings…", shell.OpenSettings));
+        menu.Items.Add(Item("Quit TabStack", shell.Quit));
         return menu;
     }
 }

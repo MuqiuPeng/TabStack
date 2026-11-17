@@ -16,14 +16,14 @@ static class HotKeyMap
     static List<Action> BuildAll()
     {
         var list = new List<Action>();
-        for (var i = 1; i <= 9; i++) list.Add(new($"workspace{i}", $"切到第 {i} 个工作区", $"Ctrl+Alt+{i}"));
-        for (var i = 1; i <= 9; i++) list.Add(new($"tab{i}", $"切到第 {i} 个标签", $"Ctrl+Alt+Shift+{i}"));
-        list.Add(new("prevTab", "上一个标签", "Ctrl+Alt+Up"));
-        list.Add(new("nextTab", "下一个标签", "Ctrl+Alt+Down"));
-        list.Add(new("prevWorkspace", "上一个工作区", "Ctrl+Alt+Left"));
-        list.Add(new("nextWorkspace", "下一个工作区", "Ctrl+Alt+Right"));
-        list.Add(new("addWindow", "把当前窗口加入工作区", "Ctrl+Alt+Shift+A"));
-        list.Add(new("toggleTile", "切换平铺模式", "Ctrl+Alt+T"));
+        for (var i = 1; i <= 9; i++) list.Add(new($"workspace{i}", $"Switch to workspace {i}", $"Ctrl+Alt+{i}"));
+        for (var i = 1; i <= 9; i++) list.Add(new($"tab{i}", $"Select tab {i}", $"Ctrl+Alt+Shift+{i}"));
+        list.Add(new("prevTab", "Previous tab", "Ctrl+Alt+Up"));
+        list.Add(new("nextTab", "Next tab", "Ctrl+Alt+Down"));
+        list.Add(new("prevWorkspace", "Previous workspace", "Ctrl+Alt+Left"));
+        list.Add(new("nextWorkspace", "Next workspace", "Ctrl+Alt+Right"));
+        list.Add(new("addWindow", "Add the active window to the workspace", "Ctrl+Alt+Shift+A"));
+        list.Add(new("toggleTile", "Toggle tiling", "Ctrl+Alt+T"));
         return list;
     }
 

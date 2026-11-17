@@ -17,9 +17,9 @@ sealed class InputDialog : Window
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Topmost = true;
         box = new TextBox { Text = initial, MinWidth = 280, Margin = new Thickness(0, 6, 0, 12) };
-        var ok = new Button { Content = "确定", IsDefault = true, MinWidth = 72, Margin = new Thickness(0, 0, 8, 0) };
+        var ok = new Button { Content = "OK", IsDefault = true, MinWidth = 72, Margin = new Thickness(0, 0, 8, 0) };
         ok.Click += (_, _) => DialogResult = true;
-        var cancel = new Button { Content = "取消", IsCancel = true, MinWidth = 72 };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 72 };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         buttons.Children.Add(ok);
         buttons.Children.Add(cancel);

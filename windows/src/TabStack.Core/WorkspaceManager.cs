@@ -428,7 +428,7 @@ public sealed class WorkspaceManager
         if (clock() - hid.at > 3 || state.Settings.MinimizeApps.Contains(hid.appID, StringComparer.OrdinalIgnoreCase)) return;
         state.Settings.MinimizeApps.Add(hid.appID);
         Save();
-        Notice?.Invoke($"有个窗口被隐藏后自己关闭了，以后切走时改为最小化这个应用：{hid.appID}");
+        Notice?.Invoke($"A window closed itself after being hidden; from now on this app is minimized instead: {hid.appID}");
     }
 
     public Settings Settings => state.Settings;

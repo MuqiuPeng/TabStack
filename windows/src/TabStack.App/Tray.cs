@@ -10,12 +10,12 @@ sealed class Tray : IDisposable
     public Tray(AppShell shell)
     {
         var menu = new WinForms.ContextMenuStrip();
-        menu.Items.Add("显示所有隐藏的窗口", null, (_, _) => shell.ShowAllHidden());
-        menu.Items.Add("设置…", null, (_, _) => shell.OpenSettings());
-        menu.Items.Add("打开数据文件夹", null, (_, _) =>
+        menu.Items.Add("Show All Hidden Windows", null, (_, _) => shell.ShowAllHidden());
+        menu.Items.Add("Settings…", null, (_, _) => shell.OpenSettings());
+        menu.Items.Add("Open Data Folder", null, (_, _) =>
             System.Diagnostics.Process.Start("explorer.exe", Core.Store.DefaultDirectory));
         menu.Items.Add(new WinForms.ToolStripSeparator());
-        menu.Items.Add("退出 TabStack", null, (_, _) => shell.Quit());
+        menu.Items.Add("Quit TabStack", null, (_, _) => shell.Quit());
 
         var stream = System.Windows.Application.GetResourceStream(new Uri("pack://application:,,,/Assets/TabStack.ico"))!.Stream;
         icon = new WinForms.NotifyIcon
