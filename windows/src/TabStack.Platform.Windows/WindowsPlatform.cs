@@ -114,8 +114,8 @@ public sealed unsafe partial class WindowsPlatform : IWindowPlatform
         PInvoke.ShowWindow(hwnd, PInvoke.IsIconic(hwnd) ? SHOW_WINDOW_CMD.SW_RESTORE : SHOW_WINDOW_CMD.SW_SHOW);
         Repaint(handle);
         if (PInvoke.SetForegroundWindow(hwnd) && PInvoke.GetForegroundWindow() == hwnd) return true;
-        // Foreground lock: a synthetic Alt press counts as input to us, which lifts it.
-        TapAlt();
+        // Foreground lock: a synthetic key press counts as input to us, which lifts it.
+        TapNothing();
         PInvoke.SetForegroundWindow(hwnd);
         PInvoke.BringWindowToTop(hwnd);
         return PInvoke.GetForegroundWindow() == hwnd;
@@ -123,13 +123,18 @@ public sealed unsafe partial class WindowsPlatform : IWindowPlatform
 
     public long ForegroundWindow() => (nint)PInvoke.GetForegroundWindow();
 
-    static void TapAlt()
+    /// <summary>Any input we send counts as the last input, which lifts the foreground lock.
+    /// It must be a key that does nothing: an Alt press (the usual trick) combines with a Shift
+    /// the user is holding into Alt+Shift, which switches the input language, and opens menus.
+    /// 0xE8 is unassigned.</summary>
+    static void TapNothing()
     {
+        const VIRTUAL_KEY Unassigned = (VIRTUAL_KEY)0xE8;
         Span<INPUT> inputs = stackalloc INPUT[2];
         inputs[0].type = INPUT_TYPE.INPUT_KEYBOARD;
-        inputs[0].Anonymous.ki.wVk = VIRTUAL_KEY.VK_MENU;
+        inputs[0].Anonymous.ki.wVk = Unassigned;
         inputs[1].type = INPUT_TYPE.INPUT_KEYBOARD;
-        inputs[1].Anonymous.ki.wVk = VIRTUAL_KEY.VK_MENU;
+        inputs[1].Anonymous.ki.wVk = Unassigned;
         inputs[1].Anonymous.ki.dwFlags = KEYBD_EVENT_FLAGS.KEYEVENTF_KEYUP;
         PInvoke.SendInput(inputs, sizeof(INPUT));
     }

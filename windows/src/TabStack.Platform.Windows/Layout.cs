@@ -126,6 +126,25 @@ public sealed unsafe partial class WindowsPlatform
             SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
     }
 
+    /// <summary>Whether a window fills the whole of a monitor (taskbar included): a full-screen
+    /// game or video, F11 in a browser. The desktop and the taskbar don't count.</summary>
+    public bool CoversMonitor(long handle, CoreRect monitor)
+    {
+        var hwnd = (HWND)(nint)handle;
+        if (handle == 0 || !PInvoke.IsWindow(hwnd) || !PInvoke.IsWindowVisible(hwnd) || PInvoke.IsIconic(hwnd)) return false;
+        var cls = ClassName(hwnd);
+        if (cls is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") return false;
+        uint pid;
+        PInvoke.GetWindowThreadProcessId(hwnd, &pid);
+        if (pid == Environment.ProcessId) return false;
+        if (!PInvoke.GetWindowRect(hwnd, out var r)) return false;
+        // Maximized windows overhang by their invisible border but stop at the work area; a
+        // full-screen one covers the monitor's own bounds.
+        RECT f;
+        if (PInvoke.DwmGetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE.DWMWA_EXTENDED_FRAME_BOUNDS, &f, (uint)sizeof(RECT)).Succeeded) r = f;
+        return r.left <= monitor.X && r.top <= monitor.Y && r.right >= monitor.X + monitor.W && r.bottom >= monitor.Y + monitor.H;
+    }
+
     public bool CloseWindow(long handle)
     {
         var hwnd = (HWND)(nint)handle;

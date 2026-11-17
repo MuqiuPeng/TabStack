@@ -101,9 +101,27 @@ sealed class SidebarWindow : Window
         source = HwndSource.FromHwnd(Handle);
         source.AddHook(WndProc);
         appBar = new AppBar(Handle);
-        appBar.FullScreenChanged += full => SidebarStyle.SetTopmost(Handle, !full);
+        // The shell's own notice (exclusive full-screen apps); AppShell also checks the
+        // foreground window itself, which catches borderless full-screen games.
+        appBar.FullScreenChanged += full => { shellFullScreen = full; shell.CheckFullScreen(); };
         appBar.Dock(WidthDip, monitor.Bounds);
         M.Changed += Refresh;
+    }
+
+    bool shellFullScreen, hiddenForFullScreen;
+    public MonitorInfo Monitor => monitor;
+    public bool ShellFullScreen => shellFullScreen;
+
+    /// <summary>A full-screen app is in front on this display: get out of its way (hidden,
+    /// not topmost) and come back when it leaves. The app-bar space stays reserved, so other
+    /// windows don't jump.</summary>
+    public void SetFullScreen(bool full)
+    {
+        if (full == hiddenForFullScreen || Handle == 0) return;
+        hiddenForFullScreen = full;
+        SidebarStyle.SetTopmost(Handle, !full);
+        if (full) Hide();
+        else Show();
     }
 
     /// <summary>Redraw soon (the manager changed).</summary>

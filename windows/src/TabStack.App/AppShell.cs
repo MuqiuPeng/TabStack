@@ -61,6 +61,7 @@ public sealed class AppShell
         {
             manager.OnForeground(h);
             if (InCurrent(h)) ScheduleCapture();
+            CheckFullScreen();
             // A window of a workspace not on screen came forward: follow it there once focus
             // has stayed on it for a moment.
             if (manager.FollowTarget(h) is { } ws)
@@ -70,7 +71,11 @@ public sealed class AppShell
             }
         };
         events.Minimized += _ => manager.NoteHandoff();
-        events.LayoutChanged += h => { if (InCurrent(h)) ScheduleCapture(); };
+        events.LayoutChanged += h =>
+        {
+            if (InCurrent(h)) ScheduleCapture();
+            if (h == platform.ForegroundWindow()) Debounce(ref fullScreen, 150, CheckFullScreen);
+        };
         events.TitleChanged += h => { if (InCurrent(h)) ScheduleRefresh(); };
         events.Destroyed += h =>
         {
@@ -85,7 +90,7 @@ public sealed class AppShell
         RegisterHotKeys();
 
         timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-        timer.Tick += (_, _) => manager.Tick();
+        timer.Tick += (_, _) => { manager.Tick(); CheckFullScreen(); };
         timer.Start();
         Log.Write("started");
     }
@@ -221,6 +226,19 @@ public sealed class AppShell
     }
 
     bool sidebarsHidden;
+    DispatcherTimer? fullScreen;
+
+    /// <summary>Hides the sidebar of every display a full-screen window in front covers (a
+    /// game, a video, F11), and shows it again once that window is gone or no longer in front.</summary>
+    public void CheckFullScreen()
+    {
+        var fg = platform.ForegroundWindow();
+        foreach (var bar in sidebars.Values)
+            bar.SetFullScreen(platform.CoversMonitor(fg, bar.Monitor.Bounds)
+                // The shell's notice is sticky and not always for this display: only trust it
+                // while the window in front is on this display.
+                || (bar.ShellFullScreen && fg != 0 && platform.GetPlacement(fg)?.Monitor == bar.Device));
+    }
     public bool SidebarsHidden => sidebarsHidden;
 
     /// <summary>Adds the window in use to the current workspace (Mac ⌃⌥A, first entry).</summary>
