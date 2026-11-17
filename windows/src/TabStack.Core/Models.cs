@@ -32,6 +32,9 @@ public sealed class AppTab
     /// <summary>Window class, used for re-binding.</summary>
     public string? ClassName { get; set; }
     public Placement? Placement { get; set; }
+    /// <summary>The window's own placement from before tiling moved it; put back when tiling
+    /// is turned off, so tiling never costs a window the size and position it had.</summary>
+    public Placement? FreePlacement { get; set; }
     public bool? NoSleep { get; set; }
 
     [JsonIgnore]

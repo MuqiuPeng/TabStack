@@ -319,6 +319,49 @@ public sealed class WorkspaceManagerTests : IDisposable
     }
 
     [Fact]
+    public void TurningTilingOffGivesWindowsTheirOwnSizeBack()
+    {
+        var a = os.Open(@"c:.exe", "A");
+        a.Rect = new Rect(300, 200, 640, 480);
+        var b = os.Open(@"c:.exe", "B");
+        b.Rect = new Rect(500, 250, 800, 600);
+        var m = Manager();
+        var ta = m.AddWindow(Info(a));
+        var tb = m.AddWindow(Info(b));
+        m.SetTiled(m.Current.Id, true);
+        m.SelectTab(ta.Id);
+        m.Pair(ta.Id, tb.Id);
+        m.SelectTab(tb.Id);
+        Assert.NotEqual(new Rect(300, 200, 640, 480), a.Rect);
+
+        m.SetTiled(m.Current.Id, false);
+        Assert.Equal(new Rect(300, 200, 640, 480), a.Rect);
+        Assert.Equal(new Rect(500, 250, 800, 600), b.Rect);
+        Assert.Null(ta.FreePlacement);
+
+        // Free mode: choosing a tab leaves its window where it is.
+        m.SelectTab(ta.Id);
+        Assert.Equal(new Rect(300, 200, 640, 480), a.Rect);
+    }
+
+    [Fact]
+    public void TilingOffWhileAwayRestoresOnReturn()
+    {
+        var a = os.Open(@"c:.exe", "A");
+        a.Rect = new Rect(300, 200, 640, 480);
+        var m = Manager();
+        var ws = m.Current;
+        var ta = m.AddWindow(Info(a));
+        m.SetTiled(ws.Id, true);
+        m.SelectTab(ta.Id);
+        var other = m.CreateWorkspace("Other");
+        m.SwitchWorkspace(other.Id);
+        m.SetTiled(ws.Id, false);
+        m.SwitchWorkspace(ws.Id);
+        Assert.Equal(new Rect(300, 200, 640, 480), a.Rect);
+    }
+
+    [Fact]
     public void MovingWindowsUpdatesTheSnapshot()
     {
         var a = os.Open(@"c:\a.exe", "A");

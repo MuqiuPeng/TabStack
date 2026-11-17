@@ -375,8 +375,10 @@ public sealed class WorkspaceManager
         var partner = tab.PairedWith is { } pid ? ws.Tab(pid) : null;
         var ph = partner is not null ? Resolve(partner)?.Hwnd : null;
         var work = (display ?? DisplayOf(ws, platform.Monitors()))?.WorkArea ?? platform.WorkArea(h);
+        RememberFree(tab);
         if (ph is { } p && p != h)
         {
+            RememberFree(partner!);
             // The member listed first goes on the left, whichever of the two was clicked.
             var left = ws.Tabs.IndexOf(tab) < ws.Tabs.IndexOf(partner!);
             ledger.Remove(p);
@@ -390,10 +392,41 @@ public sealed class WorkspaceManager
         else platform.Show(h);
     }
 
+    /// <summary>Before tiling first moves a window, keep where it was and how big.</summary>
+    void RememberFree(AppTab tab)
+    {
+        if (tab.FreePlacement is not null || tab.Hwnd is not { } h) return;
+        tab.FreePlacement = platform.GetPlacement(h) ?? tab.Placement;
+    }
+
     public void SetTiled(Guid id, bool tiled)
     {
+        if (!tiled && Find(id) is { } ws) Untile(ws);
         Edit(id, w => w.Tiled = tiled ? true : null);
         if (tiled && id == Current.Id && Current.LastTabID is { } t) SelectTab(t);
+    }
+
+    /// <summary>Tiling off: every window it moved gets its own placement back (on screen now
+    /// if the workspace is shown, otherwise the next time it is).</summary>
+    void Untile(Workspace ws)
+    {
+        var shown = Displayed.Any(w => w.Id == ws.Id);
+        var monitors = platform.Monitors();
+        var layout = new List<(long, Placement)>();
+        foreach (var t in ws.Tabs)
+        {
+            if (t.FreePlacement is not { } free) continue;
+            t.Placement = free;
+            t.FreePlacement = null;
+            if (shown && t.Hwnd is { } h && platform.GetPlacement(h) is { Visible: true })
+                layout.Add((h, LayoutMath.Fit(free, monitors)));
+        }
+        if (layout.Count > 0)
+        {
+            platform.ApplyLayout(layout);
+            // Restoring the placements changed the stacking: the selected window stays on top.
+            if (ws.LastTabID is { } lt && ws.Tab(lt)?.Hwnd is { } top && layout.Any(x => x.Item1 == top)) platform.Activate(top);
+        }
     }
 
     /// <summary>Shows two tabs side by side in tiling mode.</summary>

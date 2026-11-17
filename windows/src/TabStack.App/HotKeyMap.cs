@@ -23,7 +23,7 @@ static class HotKeyMap
         list.Add(new("prevWorkspace", "Previous workspace", "Ctrl+Alt+Left"));
         list.Add(new("nextWorkspace", "Next workspace", "Ctrl+Alt+Right"));
         list.Add(new("addWindow", "Add the active window to the workspace", "Ctrl+Alt+Shift+A"));
-        list.Add(new("toggleTile", "Toggle tiling", "Ctrl+Alt+T"));
+        list.Add(new("toggleTile", "Toggle tiling", ""));
         return list;
     }
 

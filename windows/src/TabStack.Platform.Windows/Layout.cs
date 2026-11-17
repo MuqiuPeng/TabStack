@@ -46,11 +46,20 @@ public sealed unsafe partial class WindowsPlatform
         {
             var hwnd = (HWND)(nint)handle;
             if (!PInvoke.IsWindow(hwnd)) continue;
+            var normal = p.NormalRect;
+            var state = p.State;
+            if (!Resizable(hwnd))
+            {
+                // Fixed size: keep the size it has, only put it back where it was.
+                if (PInvoke.GetWindowRect(hwnd, out var now) && !PInvoke.IsIconic(hwnd) && now.right > now.left)
+                    normal = normal with { W = now.right - now.left, H = now.bottom - now.top };
+                if (state is PlacementState.Maximized or PlacementState.Snapped) state = PlacementState.Normal;
+            }
             var wp = new WINDOWPLACEMENT
             {
                 length = (uint)sizeof(WINDOWPLACEMENT),
-                rcNormalPosition = ScreenToWorkspace(FromCore(p.NormalRect)),
-                showCmd = p.State switch
+                rcNormalPosition = ScreenToWorkspace(FromCore(normal)),
+                showCmd = state switch
                 {
                     PlacementState.Minimized => SHOW_WINDOW_CMD.SW_SHOWMINNOACTIVE,
                     // There is no "maximize without activating"; the final activation and the
@@ -60,7 +69,8 @@ public sealed unsafe partial class WindowsPlatform
                 },
             };
             PInvoke.SetWindowPlacement(hwnd, in wp);
-            if (p.State == PlacementState.Snapped)
+            if (state != PlacementState.Minimized) Repaint(handle);
+            if (state == PlacementState.Snapped)
             {
                 var r = p.ActualRect;
                 PInvoke.SetWindowPos(hwnd, HWND.Null, r.X, r.Y, r.W, r.H,
@@ -92,6 +102,16 @@ public sealed unsafe partial class WindowsPlatform
         var hwnd = (HWND)(nint)handle;
         if (!PInvoke.IsWindow(hwnd)) return;
         if (PInvoke.IsIconic(hwnd) || PInvoke.IsZoomed(hwnd)) PInvoke.ShowWindow(hwnd, SHOW_WINDOW_CMD.SW_RESTORE);
+        if (!Resizable(hwnd))
+        {
+            // Tiling a fixed-size window: centre it in the space instead of stretching it.
+            PInvoke.GetWindowRect(hwnd, out var cur);
+            int w = cur.right - cur.left, h = cur.bottom - cur.top;
+            int x = rect.X + Math.Max(0, (rect.W - w) / 2), y = rect.Y + Math.Max(0, (rect.H - h) / 2);
+            PInvoke.SetWindowPos(hwnd, HWND.Null, x, y, 0, 0,
+                SET_WINDOW_POS_FLAGS.SWP_NOSIZE | SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
+            return;
+        }
         // Windows 10/11 frames have invisible resize borders: the window rect is larger than
         // what you see. Grow the target by those margins so the visible frame fills it.
         PInvoke.GetWindowRect(hwnd, out var outer);

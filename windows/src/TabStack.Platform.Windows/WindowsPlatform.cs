@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using TabStack.Core;
 using Windows.Win32;
 using Windows.Win32.Foundation;
+using Windows.Win32.Graphics.Gdi;
 using Windows.Win32.Graphics.Dwm;
 using Windows.Win32.Security;
 using Windows.Win32.System.Com.StructuredStorage;
@@ -85,13 +86,30 @@ public sealed unsafe partial class WindowsPlatform : IWindowPlatform
 
     public void Hide(long hwnd) => PInvoke.ShowWindow((HWND)(nint)hwnd, SHOW_WINDOW_CMD.SW_HIDE);
 
-    public void Show(long hwnd) => PInvoke.ShowWindow((HWND)(nint)hwnd, SHOW_WINDOW_CMD.SW_SHOWNA);
+    public void Show(long hwnd)
+    {
+        PInvoke.ShowWindow((HWND)(nint)hwnd, SHOW_WINDOW_CMD.SW_SHOWNA);
+        Repaint(hwnd);
+    }
+
+    /// <summary>Custom-drawn windows (launchers, Qt/CEF frameless windows) often come back
+    /// from SW_HIDE blank or half drawn until something makes them paint: ask for it.</summary>
+    static void Repaint(long handle) =>
+        PInvoke.RedrawWindow((HWND)(nint)handle, (RECT?)null, default,
+            REDRAW_WINDOW_FLAGS.RDW_INVALIDATE | REDRAW_WINDOW_FLAGS.RDW_ERASE | REDRAW_WINDOW_FLAGS.RDW_FRAME | REDRAW_WINDOW_FLAGS.RDW_ALLCHILDREN);
+
+    /// <summary>Whether the window has a sizing border. Windows without one (fixed-size
+    /// launchers and dialogs, which also cannot be maximized) draw for one size only: never
+    /// resize or maximize them, only move them.</summary>
+    static bool Resizable(HWND hwnd) =>
+        ((WINDOW_STYLE)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE) & WINDOW_STYLE.WS_THICKFRAME) != 0;
 
     public bool Activate(long handle)
     {
         var hwnd = (HWND)(nint)handle;
         if (!PInvoke.IsWindow(hwnd)) return false;
         PInvoke.ShowWindow(hwnd, PInvoke.IsIconic(hwnd) ? SHOW_WINDOW_CMD.SW_RESTORE : SHOW_WINDOW_CMD.SW_SHOW);
+        Repaint(handle);
         if (PInvoke.SetForegroundWindow(hwnd) && PInvoke.GetForegroundWindow() == hwnd) return true;
         // Foreground lock: a synthetic Alt press counts as input to us, which lifts it.
         TapAlt();
