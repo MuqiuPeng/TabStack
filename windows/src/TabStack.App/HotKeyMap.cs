@@ -10,7 +10,8 @@ static class HotKeyMap
     public sealed record Action(string Id, string Label, string Default);
 
     /// <summary>Mac ⌃⌥ → Ctrl+Alt. Mac ⌥⌘ (tabs) → Ctrl+Alt+Shift: Win+Alt+digit is the taskbar
-    /// jump list on Windows, and Ctrl+Alt+A is a common screenshot key (QQ/TIM/WeChat).</summary>
+    /// jump list on Windows. QQ/TIM take Ctrl+Alt+A/F/… for screenshots by default; the user
+    /// frees them there (TIM: Settings → Hotkeys) or rebinds ours in Settings.</summary>
     public static readonly IReadOnlyList<Action> All = BuildAll();
 
     static List<Action> BuildAll()
@@ -22,7 +23,10 @@ static class HotKeyMap
         list.Add(new("nextTab", "Next tab", "Ctrl+Alt+Down"));
         list.Add(new("prevWorkspace", "Previous workspace", "Ctrl+Alt+Left"));
         list.Add(new("nextWorkspace", "Next workspace", "Ctrl+Alt+Right"));
-        list.Add(new("addWindow", "Add the active window to the workspace", "Ctrl+Alt+Shift+A"));
+        list.Add(new("addWindow", "Add a window or app to the workspace…", "Ctrl+Alt+A"));
+        list.Add(new("search", "Go to workspace…", "Ctrl+Alt+F"));
+        list.Add(new("closeWindow", "Close the active window", "Ctrl+Alt+D"));
+        list.Add(new("toggleSidebar", "Show or hide the sidebar", "Ctrl+Alt+0"));
         list.Add(new("toggleTile", "Toggle tiling", ""));
         return list;
     }

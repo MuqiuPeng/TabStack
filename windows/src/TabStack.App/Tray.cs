@@ -11,6 +11,7 @@ sealed class Tray : IDisposable
     {
         var menu = new WinForms.ContextMenuStrip();
         menu.Items.Add("Show All Hidden Windows", null, (_, _) => shell.ShowAllHidden());
+        menu.Items.Add("Show or Hide Sidebar", null, (_, _) => shell.ToggleSidebars());
         menu.Items.Add("Settings…", null, (_, _) => shell.OpenSettings());
         menu.Items.Add("Open Data Folder", null, (_, _) =>
             System.Diagnostics.Process.Start("explorer.exe", Core.Store.DefaultDirectory));

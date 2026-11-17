@@ -143,6 +143,51 @@ public sealed class FocusAndRebootTests : IDisposable
         Assert.Equal(docs2.Hwnd, t2.Hwnd);
     }
 
+    [Fact]
+    public void CloseWindowClosesItAndPicksTheNeighbour()
+    {
+        var a = os.Open(@"c:\a.exe", "A");
+        var b = os.Open(@"c:\b.exe", "B");
+        var m = Manager();
+        var ta = m.AddWindow(Info(a));
+        var tb = m.AddWindow(Info(b));
+        m.SelectTab(ta.Id);
+        Assert.True(m.CloseWindow(a.Hwnd, out var next));
+        Assert.Equal(tb.Id, next);
+        Assert.DoesNotContain(m.Current.Tabs, t => t.Id == ta.Id);
+        Assert.Null(os.Describe(a.Hwnd));
+    }
+
+    [Fact]
+    public void CloseWindowOnASharedWindowOnlyDropsItHere()
+    {
+        var claude = os.Open(@"c:\claude.exe", "Claude");
+        var code = os.Open(@"c:\code.exe", "proj");
+        var m = Manager();
+        var home = m.Current;
+        m.AddWindow(Info(code));
+        m.AddWindow(Info(claude));
+        var other = m.CreateWorkspace("Other");
+        m.SwitchWorkspace(other.Id);
+        m.AddWindow(Info(claude));
+        Assert.True(m.CloseWindow(claude.Hwnd, out _));
+        Assert.NotNull(os.Describe(claude.Hwnd));       // still running
+        Assert.False(os.Get(claude.Hwnd).Visible);      // out of sight here
+        Assert.Empty(m.Current.Tabs);
+        var kept = home.Tabs.Single(t => t.Hwnd == claude.Hwnd);
+        Assert.Null(kept.Shared);
+    }
+
+    [Fact]
+    public void CloseWindowOnAnUnknownWindowStillClosesIt()
+    {
+        var x = os.Open(@"c:\x.exe", "X");
+        var m = Manager();
+        Assert.True(m.CloseWindow(x.Hwnd, out var next));
+        Assert.Null(next);
+        Assert.False(m.CloseWindow(x.Hwnd, out _));
+    }
+
     [Theory]
     [InlineData("Inbox (18) - someone@gmail.com - Gmail - Google Chrome", "Inbox (18) - someone@gmail.com - Gmail")]
     [InlineData("(3) Messages - Google Chrome", "Messages")]

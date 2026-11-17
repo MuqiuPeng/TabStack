@@ -93,6 +93,7 @@ sealed class FakePlatform : IWindowPlatform
 
     public double Boot { get; set; } = 1_699_000_000;
     public double BootTime() => Boot;
+    public bool CloseWindow(long hwnd) { var had = Windows.Any(w => w.Hwnd == hwnd); Close(hwnd); return had; }
 
     /// <summary>A second monitor to the right of the first.</summary>
     public void AddSecondMonitor() =>

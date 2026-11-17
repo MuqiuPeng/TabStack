@@ -92,7 +92,7 @@ public sealed class WorkspaceManager
     static HashSet<long> WindowsOf(IEnumerable<Workspace> workspaces) =>
         workspaces.SelectMany(w => w.Tabs).Where(t => t.Hwnd is not null).Select(t => t.Hwnd!.Value).ToHashSet();
 
-    static MonitorInfo? Monitor(string? device, IReadOnlyList<MonitorInfo> monitors) =>
+    public static MonitorInfo? Monitor(string? device, IReadOnlyList<MonitorInfo> monitors) =>
         monitors.FirstOrDefault(m => m.Device == device);
 
     MonitorInfo? DisplayOf(Workspace ws, IReadOnlyList<MonitorInfo> monitors) =>
@@ -700,6 +700,44 @@ public sealed class WorkspaceManager
         Save();
         Changed?.Invoke();
         return tab;
+    }
+
+    /// <summary>Ctrl+Alt+D: closes a window and removes every tab bound to it. A window other
+    /// workspaces also hold (Claude, a chat app) is not closed: it just leaves this workspace
+    /// and is put out of sight. Returns false when there was nothing to close; otherwise
+    /// <paramref name="next"/> is the neighbouring tab to show, like closing a browser tab.</summary>
+    public bool CloseWindow(long hwnd, out Guid? next)
+    {
+        next = null;
+        var ws = Current;
+        var here = ws.Tabs.Where(t => t.Hwnd == hwnd).ToList();
+        if (here.FirstOrDefault() is { } first && first.Id == ws.LastTabID && ws.Tabs.Count > 1)
+        {
+            var i = ws.Tabs.IndexOf(first);
+            next = (i + 1 < ws.Tabs.Count ? ws.Tabs[i + 1] : ws.Tabs[i - 1]).Id;
+        }
+        var elsewhere = state.Workspaces.Where(w => w.Id != ws.Id && w.Tabs.Any(t => t.Hwnd == hwnd)).ToList();
+        if (here.Count > 0 && elsewhere.Count > 0)
+        {
+            foreach (var t in here) RemoveTab(t.Id);
+            if (!Others.Values.Any(id => elsewhere.Any(w => w.Id == id)) && platform.Describe(hwnd) is { Locked: false } info)
+                PutAway(hwnd, info.AppID);
+            if (elsewhere.Sum(w => w.Tabs.Count(t => t.Hwnd == hwnd)) == 1)
+                foreach (var w in elsewhere) foreach (var t in w.Tabs.Where(t => t.Hwnd == hwnd)) t.Shared = null;
+            Save();
+            Changed?.Invoke();
+            return true;
+        }
+        if (!platform.CloseWindow(hwnd)) return false;
+        foreach (var w in state.Workspaces)
+        {
+            w.Tabs.RemoveAll(t => t.Hwnd == hwnd);
+            if (w.LastTabID is { } l && w.Tab(l) is null) w.LastTabID = w.Tabs.FirstOrDefault()?.Id;
+        }
+        if (next is { } n) ws.LastTabID = n;
+        Save();
+        Changed?.Invoke();
+        return true;
     }
 
     public void RemoveTab(Guid tabID)

@@ -64,4 +64,8 @@ public interface IWindowPlatform
     /// <summary>When the system started (seconds since 1970). Window handles only hold
     /// within one boot.</summary>
     double BootTime();
+
+    /// <summary>Asks the window to close (WM_CLOSE), as its close button would. False when
+    /// it cannot be asked (elevated, gone).</summary>
+    bool CloseWindow(long hwnd);
 }

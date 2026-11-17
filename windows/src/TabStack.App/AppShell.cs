@@ -28,9 +28,11 @@ public sealed class AppShell
     {
         this.platform = platform;
         this.ledger = ledger;
+        panels = new Panels(this);
     }
 
     public WorkspaceManager Manager => manager!;
+    readonly Panels panels;
     public WindowsPlatform Platform => platform;
     /// <summary>Hotkeys that could not be registered (taken by another app), by action id.</summary>
     public HashSet<string> FailedHotKeys { get; } = new();
@@ -106,7 +108,7 @@ public sealed class AppShell
     /// stay and closes the rest.</summary>
     public void SyncSidebars()
     {
-        var monitors = manager!.SidebarMonitors();
+        IReadOnlyList<MonitorInfo> monitors = sidebarsHidden ? Array.Empty<MonitorInfo>() : manager!.SidebarMonitors();
         foreach (var gone in sidebars.Keys.Where(d => monitors.All(m => m.Device != d)).ToList())
         {
             sidebars[gone].Undock();
@@ -188,10 +190,38 @@ public sealed class AppShell
             case "nextTab": m.SelectRelative(1); break;
             case "prevWorkspace": m.SwitchRelative(-1); break;
             case "nextWorkspace": m.SwitchRelative(1); break;
-            case "addWindow": AddForeground(); break;
+            case "addWindow": panels.QuickAdd(); break;
+            case "search": panels.Search(); break;
+            case "closeWindow": CloseForeground(); break;
+            case "toggleSidebar": ToggleSidebars(); break;
             case "toggleTile": m.SetTiled(m.Current.Id, m.Current.Tiled != true); break;
         }
     }
+
+    /// <summary>Ctrl+Alt+D (Mac ⌃⌥D): close the active window and drop its tabs; the
+    /// neighbouring tab then shows, as when closing a browser tab.</summary>
+    void CloseForeground()
+    {
+        var fg = platform.ForegroundWindow();
+        if (fg == 0 || platform.Describe(fg) is not { } w || w.Pid == Environment.ProcessId
+            || !manager!.CloseWindow(fg, out var next))
+        {
+            System.Media.SystemSounds.Beep.Play();
+            return;
+        }
+        if (next is { } id) After(300, () => manager.SelectTab(id));
+    }
+
+    /// <summary>Ctrl+Alt+0 (Mac ⌘⌥0): hide the sidebars and give their space back, or bring
+    /// them back.</summary>
+    public void ToggleSidebars()
+    {
+        sidebarsHidden = !sidebarsHidden;
+        SyncSidebars();
+    }
+
+    bool sidebarsHidden;
+    public bool SidebarsHidden => sidebarsHidden;
 
     /// <summary>Adds the window in use to the current workspace (Mac ⌃⌥A, first entry).</summary>
     public void AddForeground()

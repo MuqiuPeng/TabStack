@@ -126,6 +126,12 @@ public sealed unsafe partial class WindowsPlatform
             SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
     }
 
+    public bool CloseWindow(long handle)
+    {
+        var hwnd = (HWND)(nint)handle;
+        return PInvoke.IsWindow(hwnd) && PInvoke.PostMessage(hwnd, PInvoke.WM_CLOSE, default, default);
+    }
+
     public double BootTime() =>
         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - Environment.TickCount64 / 1000.0;
 
