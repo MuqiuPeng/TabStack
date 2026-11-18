@@ -211,7 +211,7 @@ public sealed unsafe partial class WindowsPlatform : IWindowPlatform
     [DllImport("ntdll.dll")]
     static extern int NtQueryInformationProcess(nint process, int infoClass, out ProcessBasicInformation info, int size, out int returned);
 
-    static uint? ParentPid(uint pid)
+    public static uint? ParentPid(uint pid)
     {
         using var h = OpenQuery(pid);
         if (h is null) return null;

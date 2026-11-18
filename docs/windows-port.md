@@ -203,6 +203,7 @@ AppTab {
 - 关到托盘的窗口（Claude、聊天软件、Electron 应用）：程序自己隐藏的窗口（不可见且不在 hidden ledger 里）算作已关闭。TabStack 不再用 ShowWindow 把它显示出来，否则会得到一个程序以为已经关掉的无响应窗口。
   - 标签变暗；如果它是当前选中的标签，就像关闭窗口一样切到相邻标签（监听 EVENT_OBJECT_HIDE）。
   - 切回工作区时不显示它。点它的标签或按快捷键时，重新启动该程序（打包应用用 `shell:AppsFolder\<AUMID>`），由程序自己唤回窗口，再重新绑定。
+- 从商店应用（如 Claude 的终端）里启动时：Windows 会把 TabStack 的 AppData 重定向到那个应用的包目录（`Packages\<包名>\LocalCache\Local\TabStack`），正常启动时就找不到这些工作区；那个应用更新时，TabStack 也会被一起结束。启动时先试写一个探测文件，发现被重定向就通过 explorer.exe 重新启动自己（父进程已经是 explorer 时不再重试，避免循环）。
 
 ## 8. 待用户确认（已给默认值，可改）
 - 收起方式默认 SW_HIDE（按 app 可回退为最小化）。
