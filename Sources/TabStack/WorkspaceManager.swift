@@ -172,6 +172,10 @@ final class WorkspaceManager: ObservableObject {
     var onSearch: (() -> Void)?
     /// Widens the sidebar into the workspace columns (or closes them). Set by the app delegate.
     var onExpandSidebar: (() -> Void)?
+    /// Folds the expanded workspace list; returns whether it was expanded.
+    var onCollapseSidebar: (() -> Bool)?
+    /// How long folding the list takes (AppDelegate's resize animation).
+    static let collapseDuration = 0.24
     /// Whether the user wants the sidebar (⌥⌘0). It may still be hidden temporarily
     /// while a full-screen app is in front; layout follows this flag, not visibility.
     var sidebarShown = true
@@ -372,6 +376,11 @@ final class WorkspaceManager: ObservableObject {
     /// Switches to `tab`. `alsoHide` lists extra apps (bundle ids) to hide in the same
     /// motion: the apps of the workspace being left.
     func select(_ tab: AppTab, alsoHide: [String] = []) {
+        if settleTarget != nil {
+            settleTarget = .some(tab.id)
+            settle()
+            return
+        }
         currentID = primary(of: tab).id
         focusOutside = false
         updateCurrent { $0.lastTabID = tab.id } // which half of a pair had focus
@@ -397,8 +406,15 @@ final class WorkspaceManager: ObservableObject {
 
     private func performSwitch(to tab: AppTab, alsoHide: [String]) {
         guard currentID == primary(of: tab).id else { return } // superseded by a newer switch
+        if onlyThisWorkspace {
+            showWholeWorkspace { [weak self] in self?.finishSwitch(to: tab, alsoHide: alsoHide) }
+        } else {
+            finishSwitch(to: tab, alsoHide: alsoHide)
+        }
+    }
 
-        if onlyThisWorkspace { showWholeWorkspace() }
+    private func finishSwitch(to tab: AppTab, alsoHide: [String]) {
+        guard currentID == primary(of: tab).id else { return }
 
         // Activate the target *before* hiding the others: hiding the frontmost app makes
         // macOS hand focus to some other app first.
@@ -458,30 +474,56 @@ final class WorkspaceManager: ObservableObject {
     }
 
     /// Un-hides this workspace's apps, minimizing first their windows that belong only to
-    /// other workspaces and bringing back the ones parked earlier that belong here.
-    private func showWholeWorkspace() {
+    /// other workspaces and bringing back the ones parked earlier that belong here. An app
+    /// with windows to change is hidden while that happens, so neither the minimize nor
+    /// the restore animation plays over the window in front; `done` runs afterwards.
+    private func showWholeWorkspace(_ done: @escaping () -> Void) {
         let keep = shownWindowIDs
         let foreign = Set(allTabs.compactMap(\.windowID)).subtracting(keep)
-        let before = parked
+        var changes: [(app: NSRunningApplication, minimize: [(AXUIElement, CGWindowID)], restore: [(AXUIElement, CGWindowID)])] = []
         for id in Set(tabs.map(\.bundleID)) {
             guard let app = runningApp(id) else { continue }
+            var minimize: [(AXUIElement, CGWindowID)] = []
+            var restore: [(AXUIElement, CGWindowID)] = []
             for w in AX.windowsIncludingHidden(pid: app.processIdentifier) {
                 guard let wid = AX.windowID(w) else { continue }
                 let minimized = (AX.attr(w, kAXMinimizedAttribute) as Bool?) == true
                 if foreign.contains(wid), !minimized {
-                    // While the app is still hidden this happens out of sight.
-                    if AX.set(w, kAXMinimizedAttribute, kCFBooleanTrue) { parked.insert(wid) }
+                    minimize.append((w, wid))
                 } else if keep.contains(wid), parked.contains(wid) {
-                    if minimized { _ = AX.set(w, kAXMinimizedAttribute, kCFBooleanFalse) }
+                    if minimized { restore.append((w, wid)) } else { parked.remove(wid) }
+                }
+            }
+            if minimize.isEmpty, restore.isEmpty {
+                if app.isHidden { app.unhide() }
+            } else {
+                changes.append((app, minimize, restore))
+                if !app.isHidden { app.hide() }
+            }
+        }
+        guard !changes.isEmpty else { saveParked(); done(); return }
+        noteFocusHandoff()
+
+        // Hiding takes effect a moment later; change the windows only once it has.
+        func apply(attempt: Int) {
+            if attempt < 15, changes.contains(where: { !$0.app.isHidden && !$0.app.isTerminated }) {
+                after(0.02) { apply(attempt: attempt + 1) }
+                return
+            }
+            for c in changes {
+                for (w, wid) in c.minimize where AX.set(w, kAXMinimizedAttribute, kCFBooleanTrue) { parked.insert(wid) }
+                for (w, wid) in c.restore {
+                    _ = AX.set(w, kAXMinimizedAttribute, kCFBooleanFalse)
                     parked.remove(wid)
                 }
             }
-            if app.isHidden { app.unhide() }
-        }
-        if parked != before {
-            noteFocusHandoff()
             saveParked()
+            after(0.03) {
+                for c in changes { c.app.unhide() }
+                done()
+            }
         }
+        apply(attempt: 0)
     }
 
     /// A window restored in the background for another workspace, while its app is on
@@ -545,38 +587,111 @@ final class WorkspaceManager: ObservableObject {
 
     // MARK: Switching workspaces
 
+    /// How long the windows wait after a workspace switch (`switchDelay` seconds, and
+    /// while ⌃/⌥ are still held), so flipping through workspaces only moves the sidebar.
+    static let switchDelayKey = "switchDelay"
+    var switchDelay: Double { UserDefaults.standard.object(forKey: Self.switchDelayKey) as? Double ?? 0.4 }
+
+    /// The workspace whose windows are actually on screen; differs from
+    /// `currentWorkspaceID` while a switch waits to be applied.
+    private var shownWorkspaceID: UUID?
+    /// Apps of the workspaces passed through since the windows last changed.
+    private var settleLeaving: Set<String> = []
+    private var settleSwapped = false
+    private var settleToken = 0
+    /// The tab a waiting switch will show; nil when no switch waits.
+    private var settleTarget: UUID??
+
     /// Switches workspace; `tabID` picks the tab to show there instead of the last one used.
-    func switchWorkspace(_ id: UUID, to tabID: UUID? = nil) {
+    /// The sidebar moves at once; the windows follow once the user stops switching, unless
+    /// `immediate` (a choice already made: a search pick, a followed focus, a script).
+    func switchWorkspace(_ id: UUID, to tabID: UUID? = nil, immediate: Bool = false) {
         if id == currentWorkspaceID {
-            if let tab = tabs.first(where: { $0.id == tabID }) { select(tab) }
+            if settleTarget != nil {
+                if let tabID { settleTarget = .some(tabID) }
+                if immediate { settle() }
+            } else if let tab = tabs.first(where: { $0.id == tabID }) {
+                select(tab)
+            }
             return
         }
         guard let next = workspaces.first(where: { $0.id == id }) else { return }
         let from = workspaces.firstIndex { $0.id == currentWorkspaceID } ?? 0
         let to = workspaces.firstIndex { $0.id == id } ?? 0
         workspaceDirection = to >= from ? 1 : -1
+        if shownWorkspaceID == nil { shownWorkspaceID = currentWorkspaceID }
 
         // Shown on another display already: the two displays trade workspaces, windows and all.
-        let swapDisplay = otherDisplay(showing: id)
-        let leftID = currentWorkspaceID
-        if let d = swapDisplay { otherDisplays[d] = DisplayState(workspace: leftID, tab: currentID) }
-
-        rememberClaudeSession(leaving: leftID)
-        after(1) { [weak self] in self?.snapshotBrowsers() }
-        let keep = Set(next.tabs.map(\.bundleID)).union(appsOnOtherDisplays)
-        let leaving = Array(Set(tabs.map(\.bundleID)).subtracting(keep))
+        if let d = otherDisplay(showing: id) {
+            otherDisplays[d] = DisplayState(workspace: currentWorkspaceID, tab: currentID)
+            settleSwapped = true
+        }
+        settleLeaving.formUnion(tabs.map(\.bundleID))
         currentWorkspaceID = id
-        currentID = nil
         recordUse(id)
         recomputeActive()
         save()
 
         let target = next.tabs.first(where: { $0.id == tabID })
             ?? next.tabs.first(where: { $0.id == next.lastTabID }) ?? next.tabs.first
-        if let d = swapDisplay {
-            gather(leftID, onto: d, raise: otherDisplays[d]?.tab)
+        currentID = target.map { primary(of: $0).id }
+        settleTarget = .some(target?.id)
+        settleToken += 1
+        if immediate || switchDelay <= 0 {
+            settle()
+        } else {
+            waitToSettle(token: settleToken, at: Date().addingTimeInterval(switchDelay))
+        }
+    }
+
+    /// Holds focus handling off (the old windows are still in front) and applies the
+    /// switch once the delay is over and the switching keys are released.
+    private func waitToSettle(token: Int, at due: Date) {
+        guard token == settleToken, settleTarget != nil else { return }
+        // Still choosing: switching keys held, or the pointer on the expanded list.
+        let held = !NSEvent.modifierFlags.intersection([.control, .option]).isEmpty
+            || (expanded && hoveringSidebar)
+        if Date() >= due, !held {
+            // The workspace list folds away first; the windows change after it.
+            if onCollapseSidebar?() == true {
+                pending = (currentID ?? UUID(), Date().addingTimeInterval(1))
+                after(Self.collapseDuration) { [weak self] in
+                    guard let self, token == self.settleToken else { return }
+                    self.settle()
+                }
+            } else {
+                settle()
+            }
+            return
+        }
+        pending = (currentID ?? UUID(), Date().addingTimeInterval(1))
+        let wait = held ? 0.08 : max(0.02, due.timeIntervalSinceNow)
+        after(wait) { [weak self] in self?.waitToSettle(token: token, at: due) }
+    }
+
+    /// Makes the windows match the sidebar: shows the current workspace, puts away the
+    /// apps of every workspace passed through since the windows last changed.
+    private func settle() {
+        guard let wanted = settleTarget else { return }
+        settleTarget = nil
+        settleToken += 1
+        let id = currentWorkspaceID
+        if let shown = shownWorkspaceID, shown != id {
+            rememberClaudeSession(leaving: shown)
+            after(1) { [weak self] in self?.snapshotBrowsers() }
+        }
+        shownWorkspaceID = id
+        let ws = currentWorkspace
+        let target = ws.tabs.first(where: { $0.id == wanted })
+            ?? ws.tabs.first(where: { $0.id == ws.lastTabID }) ?? ws.tabs.first
+        if settleSwapped {
+            settleSwapped = false
+            for (d, state) in otherDisplays { gather(state.workspace, onto: d, raise: state.tab) }
             gather(id, onto: focusedDisplay, except: target?.id)
         }
+        let keep = Set(tabs.map(\.bundleID)).union(appsOnOtherDisplays)
+        let leaving = Array(settleLeaving.subtracting(keep))
+        settleLeaving = []
         if let target {
             select(target, alsoHide: leaving)
             if UserDefaults.standard.object(forKey: "restoreOnSwitch") as? Bool ?? true {
@@ -597,7 +712,7 @@ final class WorkspaceManager: ObservableObject {
     func newWorkspace() {
         guard let name = Dialogs.prompt(title: "新建工作区", message: "给这组窗口起个名字", value: "工作区 \(workspaces.count + 1)")
         else { return }
-        switchWorkspace(createWorkspace(named: name))
+        switchWorkspace(createWorkspace(named: name), immediate: true)
     }
 
     func renameCurrentWorkspace() {
@@ -610,7 +725,7 @@ final class WorkspaceManager: ObservableObject {
               Dialogs.confirm(title: "删除工作区“\(currentWorkspace.name)”？", message: "只删除这组标签，不会关闭其中的窗口或应用。")
         else { return }
         let removed = currentWorkspaceID
-        switchWorkspace(fallbackWorkspace(for: removed))
+        switchWorkspace(fallbackWorkspace(for: removed), immediate: true)
         workspaces.removeAll { $0.id == removed }
         assignDisplays()
         save()
@@ -1264,7 +1379,7 @@ final class WorkspaceManager: ObservableObject {
     /// Deletes without asking (the control socket); leaves it first if it is current.
     func removeWorkspace(_ id: UUID) {
         guard workspaces.count > 1 else { return }
-        if id == currentWorkspaceID { switchWorkspace(fallbackWorkspace(for: id)) }
+        if id == currentWorkspaceID { switchWorkspace(fallbackWorkspace(for: id), immediate: true) }
         workspaces.removeAll { $0.id == id }
         assignDisplays()
         save()
@@ -1277,7 +1392,7 @@ final class WorkspaceManager: ObservableObject {
         guard workspaces.count > 1, let ws = workspaces.first(where: { $0.id == id }),
               Dialogs.confirm(title: "删除工作区“\(ws.name)”？", message: "只删除这组标签，不会关闭其中的窗口或应用。")
         else { return }
-        if id == currentWorkspaceID { switchWorkspace(fallbackWorkspace(for: id)) }
+        if id == currentWorkspaceID { switchWorkspace(fallbackWorkspace(for: id), immediate: true) }
         workspaces.removeAll { $0.id == id }
         assignDisplays()
         save()
@@ -1486,7 +1601,15 @@ final class WorkspaceManager: ObservableObject {
 
     // MARK: Observation
 
+    /// Watches the running-app list itself: the launch / quit notifications can arrive
+    /// before the list changes (an app relaunching itself to update), which left an app
+    /// that runs counted as quit, its tabs grey.
+    private var runningObservation: NSKeyValueObservation?
+
     private func observeWorkspace() {
+        runningObservation = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.refreshRunning() }
+        }
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
             self?.refreshRunning()
@@ -1649,7 +1772,7 @@ final class WorkspaceManager: ObservableObject {
                   let w = AX.focusedWindow(pid: pid), AX.windowID(w) == wid,
                   !self.tabs.contains(where: { $0.windowID == wid }),
                   self.workspaces.contains(where: { $0.id == ws.id }) else { return }
-            self.switchWorkspace(ws.id, to: tab.id)
+            self.switchWorkspace(ws.id, to: tab.id, immediate: true)
         }
     }
 
@@ -1696,6 +1819,7 @@ final class WorkspaceManager: ObservableObject {
 
     private func tick() {
         tickCount += 1
+        refreshRunning()
         let t = AX.isTrusted
         if t != trusted {
             trusted = t

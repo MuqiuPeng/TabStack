@@ -37,6 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         manager.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         manager.onOpenSettings = { [weak self] id in self?.settings.show(workspace: id) }
         manager.onSearch = { [weak self] in self?.search.show() }
+        manager.onCollapseSidebar = { [weak self] in
+            guard let self, self.manager.expanded else { return false }
+            self.collapseList(animated: true)
+            return true
+        }
         manager.onExpandSidebar = { [weak self] in
             guard let self else { return }
             if self.manager.expanded { self.collapseList(animated: true) } else { self.flashWorkspaceList() }
@@ -278,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         frame.size.width = width
         guard animated, !Motion.reduce else { panel.setFrame(frame, display: true); return }
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.24
+            ctx.duration = WorkspaceManager.collapseDuration
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
             panel.animator().setFrame(frame, display: true)
         }

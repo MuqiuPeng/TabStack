@@ -319,6 +319,7 @@ private struct GeneralSettings: View {
     @AppStorage("syncClaudeSession") private var syncClaudeSession = true
     @AppStorage(SmartLabels.enabledKey) private var smartLabels = true
     @AppStorage(WorkspaceManager.onlyThisWorkspaceKey) private var onlyThisWorkspace = true
+    @AppStorage(WorkspaceManager.switchDelayKey) private var switchDelay = 0.4
     @AppStorage("activeWorkspaceLimit") private var limit = 5
     @AppStorage("splitMinWidth") private var splitMinWidth = 2400.0
 
@@ -332,6 +333,11 @@ private struct GeneralSettings: View {
             Section("切换") {
                 Toggle("切换窗口时显示磨砂过渡", isOn: $curtain)
                 Text("系统开启“减弱动态效果”时，所有动画会改为淡入淡出。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Stepper(switchDelay > 0 ? "切换工作区后等 \(String(format: "%.1f", switchDelay)) 秒再换窗口" : "切换工作区后立刻换窗口",
+                        value: $switchDelay, in: 0...2, step: 0.1)
+                Text("用快捷键或侧边栏连续翻工作区时，只有侧边栏跟着动；停下来一会儿（并松开 ⌃⌥）后才显示那个工作区的窗口、收起其他窗口。等待期间点一下侧边栏里的标签会立刻切换。用 ⌃⌥F 搜索、跟随焦点或脚本切换时不等待。")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Toggle("调度中心只显示当前工作区的窗口", isOn: $onlyThisWorkspace)

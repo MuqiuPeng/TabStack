@@ -85,7 +85,7 @@ final class WorkspaceSearchController: NSObject, NSWindowDelegate {
         guard model.results.indices.contains(index) else { NSSound.beep(); return }
         let id = model.results[index].id
         close()
-        manager.switchWorkspace(id)
+        manager.switchWorkspace(id, immediate: true)
     }
 
     private func makePanel() -> SearchPanel {

@@ -259,7 +259,7 @@ final class ControlCommands {
         let id = m.createWorkspace(named: name)
         if let c = p["color"] as? Int { m.setColor(id, c % WorkspaceColor.palette.count) }
         if p["pinned"] as? Bool == true { m.setPinned(id, true) }
-        if p["switch"] as? Bool == true { m.switchWorkspace(id) }
+        if p["switch"] as? Bool == true { m.switchWorkspace(id, immediate: true) }
         return describe(m.workspaces.first { $0.id == id }!)
     }
 
@@ -293,7 +293,7 @@ final class ControlCommands {
         let ws = try workspace(p["workspace"])
         var tabID: UUID?
         if p["tab"] != nil { tabID = try tab(p.merging(["workspace": ws.id.uuidString]) { $1 }).0.id }
-        m.switchWorkspace(ws.id, to: tabID)
+        m.switchWorkspace(ws.id, to: tabID, immediate: true)
         return describe(ws)
     }
 
@@ -416,7 +416,7 @@ final class ControlCommands {
             guard let self else { return }
             switch result {
             case .success(let tab):
-                if activate { self.m.switchWorkspace(ws.id, to: tab.id) }
+                if activate { self.m.switchWorkspace(ws.id, to: tab.id, immediate: true) }
                 done(.success(self.describe(tab)))
             case .failure(let e):
                 done(.failure(Failure(e.message)))

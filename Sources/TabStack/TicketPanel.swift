@@ -231,10 +231,10 @@ final class TicketPanelController: NSObject, NSWindowDelegate {
         }
         let claudeTab = ws.tabs.first { $0.bundleID == claude }
         if let s = t.session, s.hasPrefix("local_"), let claudeTab {
-            manager.switchWorkspace(ws.id, to: claudeTab.id)
+            manager.switchWorkspace(ws.id, to: claudeTab.id, immediate: true)
             manager.setClaudeSession(s, for: ws.id)
         } else {
-            manager.switchWorkspace(ws.id)
+            manager.switchWorkspace(ws.id, immediate: true)
         }
     }
 
