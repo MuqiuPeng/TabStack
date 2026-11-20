@@ -13,8 +13,7 @@ static class Launcher
     public static bool Start(AppTab tab)
     {
         var target = tab.AppID.Contains('!') ? @"shell:AppsFolder\" + tab.AppID
-            : tab.ExePath is { } exe && File.Exists(exe) ? exe
-            : File.Exists(tab.AppID) ? tab.AppID : null;
+            : AppIds.Locate(tab.ExePath);
         if (target is null) return false;
         try
         {

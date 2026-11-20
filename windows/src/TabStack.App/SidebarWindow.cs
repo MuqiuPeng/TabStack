@@ -204,7 +204,7 @@ sealed class SidebarWindow : Window
         var info = tab.Hwnd is { } h ? M.Live(h) : null;
         // The focused workspace's tab is lit only while its window has the focus.
         var selected = ws.LastTabID == tab.Id && !(ws.Id == M.Current.Id && M.FocusOutside);
-        var image = IconCache.For(info?.ExePath ?? tab.ExePath);
+        var image = IconCache.For(info?.ExePath ?? AppIds.Locate(tab.ExePath) ?? tab.ExePath);
         FrameworkElement glyph = image is not null
             ? new Image { Source = image, Width = 28, Height = 28 }
             : new TextBlock

@@ -72,7 +72,7 @@ public sealed unsafe partial class WindowsPlatform : IWindowPlatform
         // A helper process drawing the app's window (Steam's steamwebhelper.exe): the window
         // is the app's, and relaunching means starting the app, not the helper.
         if (exe is not null && HelperOwner(appPid, exe) is { } owner) (appPid, exe) = owner;
-        var appID = aumid ?? exe?.ToLowerInvariant() ?? $"pid:{appPid}";
+        var appID = aumid ?? (exe is null ? null : AppIds.FromExe(exe)) ?? $"pid:{appPid}";
         var title = Text(hwnd);
         return new WindowInfo(handle, appID, AppName(exe, aumid, title), title, cls, (int)appPid, exe,
             Locked: !selfElevated && IsLocked(appPid), Visible: PInvoke.IsWindowVisible(hwnd), Minimized: PInvoke.IsIconic(hwnd));

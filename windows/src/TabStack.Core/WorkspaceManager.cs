@@ -30,6 +30,7 @@ public sealed class WorkspaceManager
         this.ledger = ledger;
         this.clock = clock ?? Frecency.Now;
         state = store.Load();
+        Migrate();
         if (state.Workspaces.Count == 0)
             state.Workspaces.Add(new Workspace { Name = "Default", Color = 0 });
         if (state.CurrentWorkspace is not { } cur || state.Workspaces.All(w => w.Id != cur))
@@ -183,6 +184,15 @@ public sealed class WorkspaceManager
     public List<Workspace> Search(string query) => Frecency.Search(state.Workspaces, query, clock());
 
     // ───────────────────────── Binding ─────────────────────────
+
+    /// <summary>App ids saved before version folders were left out of them (see
+    /// <see cref="AppIds"/>): bring them to the current form, so an app updated since still
+    /// matches its tabs and settings.</summary>
+    void Migrate()
+    {
+        foreach (var t in state.Workspaces.SelectMany(w => w.Tabs)) t.AppID = AppIds.FromExe(t.AppID);
+        state.Settings.MinimizeApps = state.Settings.MinimizeApps.Select(AppIds.FromExe).Distinct().ToList();
+    }
 
     /// <summary>Drop handles that no longer name the same app's window (after a restart).</summary>
     void ValidateBindings()

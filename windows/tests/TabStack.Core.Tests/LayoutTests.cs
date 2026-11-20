@@ -55,3 +55,30 @@ public class LayoutTests
         Assert.Equal("R", LayoutMath.Fit(p, [Left, Right4k]).Monitor);
     }
 }
+
+public sealed class AppIdTests
+{
+    [Theory]
+    [InlineData(@"D:\ProgramFiles\miHoYo Launcher\1.19.0.382\HYP.exe", @"d:\programfiles\mihoyo launcher\*\hyp.exe")]
+    [InlineData(@"D:\ProgramFiles\miHoYo Launcher\1.20.1.392\HYP.exe", @"d:\programfiles\mihoyo launcher\*\hyp.exe")]
+    [InlineData(@"C:\Users\me\AppData\Local\Discord\app-1.0.9213\Discord.exe", @"c:\users\me\appdata\local\discord\*\discord.exe")]
+    [InlineData(@"C:\Users\me\.claude-science\electron\42.10.0\claude-science.exe", @"c:\users\me\.claude-science\electron\*\claude-science.exe")]
+    [InlineData(@"C:\Program Files\Steam\steam.exe", @"c:\program files\steam\steam.exe")]
+    [InlineData(@"C:\Apps\Tool2\v3\tool.exe", @"c:\apps\tool2\v3\tool.exe")]
+    [InlineData("Claude_pzs8sxrjxfjjc!Claude", "Claude_pzs8sxrjxfjjc!Claude")]
+    public void VersionFoldersAreLeftOut(string exe, string id) => Assert.Equal(id, AppIds.FromExe(exe));
+
+    [Fact]
+    public void AnUpdatedAppIsFoundInItsNewFolder()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "tabstack-appids-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "1.20.1.392"));
+            File.WriteAllText(Path.Combine(root, "1.20.1.392", "HYP.exe"), "");
+            Assert.Equal(Path.Combine(root, "1.20.1.392", "HYP.exe"), AppIds.Locate(Path.Combine(root, "1.19.0.382", "HYP.exe")));
+            Assert.Null(AppIds.Locate(Path.Combine(root, "1.19.0.382", "Other.exe")));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+}
