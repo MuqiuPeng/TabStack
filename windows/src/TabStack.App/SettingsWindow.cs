@@ -14,6 +14,7 @@ sealed class SettingsWindow : Window
     readonly Dictionary<string, TextBox> chordBoxes = new();
     readonly ListBox minimizeList = new() { Height = 110 };
     readonly TextBox limitBox = new() { Width = 48 };
+    readonly CheckBox startAtLogin = new() { Content = "Start TabStack when I sign in to Windows", Margin = new Thickness(0, 0, 0, 4) };
     readonly Dictionary<string, CheckBox> monitorBoxes = new();
     readonly TextBlock status = new() { Foreground = Brushes.Firebrick, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
 
@@ -29,6 +30,10 @@ sealed class SettingsWindow : Window
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
 
         var root = new StackPanel { Margin = new Thickness(16) };
+
+        root.Children.Add(Header("General"));
+        startAtLogin.IsChecked = M.Settings.StartAtLogin;
+        root.Children.Add(startAtLogin);
 
         root.Children.Add(Header("Sidebar"));
         var limitRow = new StackPanel { Orientation = Orientation.Horizontal };
@@ -143,11 +148,13 @@ sealed class SettingsWindow : Window
         {
             s.NoSidebarMonitors = noSidebar;
             s.MinimizeApps = minimizeList.Items.Cast<string>().ToList();
+            s.StartAtLogin = startAtLogin.IsChecked == true;
             s.HotKeys = HotKeyMap.All
                 .Where(a => chordBoxes[a.Id].Text != a.Default)
                 .ToDictionary(a => a.Id, a => chordBoxes[a.Id].Text);
         });
         M.ActiveLimit = limit;
+        Autostart.Apply(M.Settings.StartAtLogin);
         shell.RegisterHotKeys();
         if (monitorsChanged)
         {

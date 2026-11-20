@@ -139,6 +139,8 @@ public sealed class Settings
     /// <summary>Apps whose windows are minimized instead of hidden when their workspace is left
     /// (apps that close or misbehave when hidden), by appID.</summary>
     public List<string> MinimizeApps { get; set; } = new();
+    /// <summary>Start TabStack when the user signs in to Windows.</summary>
+    public bool StartAtLogin { get; set; } = true;
     /// <summary>Hotkey overrides: action id → chord such as "Ctrl+Alt+Left"; "" disables.</summary>
     public Dictionary<string, string> HotKeys { get; set; } = new();
     /// <summary>Monitors (by id) that get no sidebar and show no workspace of their own;
