@@ -13,6 +13,7 @@ public sealed class AppShell
     readonly WindowsPlatform platform;
     readonly HiddenLedger ledger;
     WorkspaceManager? manager;
+    Sleeper? sleeper;
     /// <summary>One sidebar per display that has one, by monitor id.</summary>
     readonly Dictionary<string, SidebarWindow> sidebars = new();
     /// <summary>Message-only window that receives WM_HOTKEY (sidebars come and go with monitors).</summary>
@@ -51,7 +52,12 @@ public sealed class AppShell
             return 0;
         });
         Autostart.Apply(manager.Settings.StartAtLogin);
+        sleeper = new Sleeper(manager, platform, new WindowsSleep());
+        // What is on screen changed: wake its processes, reopen windows sleep closed.
+        manager.Changed += () => Debounce(ref wake, 50, WakeDisplayed);
         manager.AssignDisplays();
+        var put = manager.PutAwayUndisplayed();
+        if (put > 0) Log.Write($"put away {put} window(s) of workspaces not on screen");
         SyncSidebars();
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaysChanged;
         tray = new Tray(this);
@@ -109,7 +115,30 @@ public sealed class AppShell
         timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         timer.Tick += (_, _) => { manager.Tick(); CheckFullScreen(); };
         timer.Start();
+        sleepTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+        sleepTimer.Tick += (_, _) => sleeper.Evaluate();
+        sleepTimer.Start();
         Log.Write("started");
+    }
+
+    DispatcherTimer? sleepTimer, wake, adopt;
+
+    void WakeDisplayed()
+    {
+        sleeper!.WakeDisplayed();
+        WatchReopening();
+    }
+
+    /// <summary>While windows sleep closed are being reopened, bind them as they appear.</summary>
+    void WatchReopening()
+    {
+        if (!sleeper!.Reopening || adopt is { IsEnabled: true }) return;
+        adopt ??= new DispatcherTimer(TimeSpan.FromMilliseconds(400), DispatcherPriority.Background, (_, _) =>
+        {
+            sleeper.Adopt();
+            if (!sleeper.Reopening) adopt!.Stop();
+        }, Dispatcher.CurrentDispatcher);
+        adopt.Start();
     }
 
     /// <summary>A window of a workspace on screen (on any display).</summary>
@@ -226,7 +255,9 @@ public sealed class AppShell
     {
         var m = manager!;
         if (m.SelectTab(tab.Id)) return;
-        if (!Launcher.Start(tab)) return;
+        // Closed by sleep: open it again as it was (its folder), not just its app.
+        if (tab.Slept is not null && sleeper!.StartReopen(tab)) WatchReopening();
+        else if (!Launcher.Start(tab)) return;
         var deadline = DateTime.Now.AddSeconds(15);
         var poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         poll.Tick += (_, _) =>
@@ -298,6 +329,8 @@ public sealed class AppShell
     public void Stop()
     {
         timer?.Stop();
+        sleepTimer?.Stop();
+        sleeper?.WakeAll();
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaysChanged;
         hotkeys?.Dispose();
         hotkeyWindow?.Dispose();

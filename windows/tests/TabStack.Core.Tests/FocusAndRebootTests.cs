@@ -41,6 +41,34 @@ public sealed class FocusAndRebootTests : IDisposable
     }
 
     [Fact]
+    public void AtStartWindowsOfWorkspacesNotOnScreenArePutAwayAgain()
+    {
+        var term = os.Open(@"c:\term.exe", "Terminal");
+        var code = os.Open(@"c:\code.exe", "proj");
+        var chat = os.Open(@"c:\tim.exe", "Chat");
+        var m = Manager();
+        var home = m.Current;
+        m.AddWindow(Info(term));
+        m.AddWindow(Info(chat));
+        var work = m.CreateWorkspace("Work");
+        m.SwitchWorkspace(work.Id);
+        m.AddWindow(Info(code));
+        m.AddWindow(Info(chat)); // shared with Home
+        m.SwitchWorkspace(home.Id);
+        // TabStack quit (showing every hidden window) and starts again.
+        m.ShowAllHidden();
+        Assert.True(os.Get(code.Hwnd).Visible);
+        var again = Manager();
+        Assert.Equal(1, again.PutAwayUndisplayed());
+        Assert.False(os.Get(code.Hwnd).Visible);
+        Assert.True(os.Get(term.Hwnd).Visible);
+        Assert.True(os.Get(chat.Hwnd).Visible); // Home, on screen, holds it too
+        // Coming back to Work shows it again.
+        again.SwitchWorkspace(work.Id);
+        Assert.True(os.Get(code.Hwnd).Visible);
+    }
+
+    [Fact]
     public void FocusHandedOverIsNotFollowed()
     {
         var code = os.Open(@"c:\code.exe", "proj");

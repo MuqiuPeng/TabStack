@@ -30,7 +30,11 @@ public sealed class AppTab
     public string? ExePath { get; set; }
     /// <summary>Window class, used for re-binding.</summary>
     public string? ClassName { get; set; }
+    /// <summary>Never throttle or close this tab's app while its workspace sleeps.</summary>
     public bool? NoSleep { get; set; }
+    /// <summary>TabStack closed the window to free memory while its workspace slept (see
+    /// <see cref="Reopen"/>); this is where it was, to put it back when it is reopened.</summary>
+    public Placement? Slept { get; set; }
 
     [JsonIgnore]
     public string DisplayName =>
@@ -80,7 +84,9 @@ public sealed class Placement
 public enum SleepLevel
 {
     Awake,
+    /// <summary>Its apps run in efficiency mode (EcoQoS, idle priority).</summary>
     Throttled,
+    /// <summary>Some of its windows were closed to free memory; they reopen on return.</summary>
     Closed,
 }
 
@@ -89,6 +95,10 @@ public sealed class SleepState
     public SleepLevel Level { get; set; }
     public double Since { get; set; }
 }
+
+/// <summary>A process TabStack put in efficiency mode, and the priority to give back.
+/// <see cref="Root"/> is the app process whose window is a tab; the others are its children.</summary>
+public sealed record ThrottledProcess(int Root, int Pid, long Start, int Priority);
 
 /// <summary>A saved set of windows. Switching workspaces hides the previous set and brings
 /// back the one selected last in the new one.</summary>
@@ -132,6 +142,8 @@ public sealed class AppState
     public Dictionary<string, Guid>? OtherDisplays { get; set; }
     /// <summary>What displays showed before they were unplugged, so they get it back.</summary>
     public Dictionary<string, Guid>? RememberedDisplays { get; set; }
+    /// <summary>Processes in efficiency mode, so a TabStack that crashed gives them back.</summary>
+    public List<ThrottledProcess>? Throttled { get; set; }
 }
 
 public sealed class Settings
@@ -146,4 +158,16 @@ public sealed class Settings
     /// <summary>Monitors (by id) that get no sidebar and show no workspace of their own;
     /// windows there belong to whichever workspace they are tabs of.</summary>
     public List<string> NoSidebarMonitors { get; set; } = new();
+
+    /// <summary>Workspaces left for a while sleep: their apps run in efficiency mode.</summary>
+    public bool Sleep { get; set; } = true;
+    /// <summary>How long a workspace is away before it sleeps (N).</summary>
+    public int SleepAfterMinutes { get; set; } = 15;
+    /// <summary>The most used workspaces that never sleep (K).</summary>
+    public int AwakeWorkspaces { get; set; } = 3;
+    /// <summary>When memory runs low, close the windows of sleeping workspaces that can be
+    /// reopened as they were (VS Code folders, File Explorer folders).</summary>
+    public bool CloseWhenMemoryLow { get; set; } = true;
+    /// <summary>Memory in use (percent) that counts as low.</summary>
+    public int MemoryLowPercent { get; set; } = 80;
 }

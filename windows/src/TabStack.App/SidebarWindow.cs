@@ -247,11 +247,15 @@ sealed class SidebarWindow : Window
             });
             snapped = string.Join(", ", ws.Tabs.Where(t => t.Id != tab.Id && groups.TryGetValue(t.Id, out var g) && g == group).Select(t => t.DisplayName));
         }
+        if (tab.Slept is not null)
+            grid.Children.Add(new TextBlock { Text = "☾", FontSize = 11, Foreground = Foreground0, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 6, 3) });
         if (tab.Shared == true)
             grid.Children.Add(new TextBlock { Text = "⧉", FontSize = 10, Foreground = Foreground0, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 4, 6, 0) });
 
         var tip = tab.DisplayName;
-        if (info is null) tip += "\n(Window not open: click to find it by title, or launch the app)";
+        if (tab.Slept is not null) tip += "\n(Closed to save memory while this workspace slept: click to reopen it)";
+        else if (info is null) tip += "\n(Window not open: click to find it by title, or launch the app)";
+        if (tab.NoSleep == true) tip += "\n(Never sleeps)";
         if (info?.Locked == true) tip += "\n(Running as administrator: TabStack can't hide it)";
         if (snapped is not null) tip += "\nSnapped with: " + snapped;
         var b = new Button
@@ -349,6 +353,13 @@ sealed class SidebarWindow : Window
             mi.Header = ws.Name + " (other display)";
             mi.ToolTip = "Shown on the other display; choosing it swaps the two displays' workspaces";
         }
+        else if (ws.Sleep?.Level is { } level and not SleepLevel.Awake)
+        {
+            mi.Header = ws.Name + "  ☾";
+            mi.ToolTip = level == SleepLevel.Closed
+                ? "Asleep: its apps run in efficiency mode, and some windows were closed to save memory (they reopen when you switch here)"
+                : "Asleep: its apps run in efficiency mode until you switch here";
+        }
         return mi;
     }
 
@@ -413,6 +424,7 @@ sealed class SidebarWindow : Window
         var i = M.Current.Tabs.FindIndex(t => t.Id == tab.Id);
         menu.Items.Add(Item("Move Up", () => M.MoveTab(tab.Id, i - 1), enabled: i > 0));
         menu.Items.Add(Item("Move Down", () => M.MoveTab(tab.Id, i + 1), enabled: i < M.Current.Tabs.Count - 1));
+        menu.Items.Add(Item("Never Sleep", () => M.SetTabNoSleep(tab.Id, tab.NoSleep != true), check: tab.NoSleep == true));
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("Remove from Workspace", () => M.RemoveTab(tab.Id)));
         return menu;
@@ -437,6 +449,7 @@ sealed class SidebarWindow : Window
         }
         menu.Items.Add(colors);
         menu.Items.Add(Item("Pin to Sidebar", () => M.SetPinned(ws.Id, ws.Pinned != true), check: ws.Pinned == true));
+        menu.Items.Add(Item("Never Sleep", () => M.SetNoSleep(ws.Id, ws.NoSleep != true), check: ws.NoSleep == true));
         var idx = M.Workspaces.ToList().FindIndex(w => w.Id == ws.Id);
         menu.Items.Add(Item("Move Workspace Up", () => M.MoveWorkspace(ws.Id, idx - 1), enabled: idx > 0));
         menu.Items.Add(Item("Move Workspace Down", () => M.MoveWorkspace(ws.Id, idx + 1), enabled: idx < M.Workspaces.Count - 1));

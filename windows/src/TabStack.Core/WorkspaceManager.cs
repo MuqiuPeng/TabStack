@@ -169,6 +169,25 @@ public sealed class WorkspaceManager
         Changed?.Invoke();
     }
 
+    /// <summary>At start: windows of workspaces no display shows go out of sight again. On quit
+    /// (and after a crash, the watchdog) every hidden window is shown, so without this they
+    /// would stay on screen until their workspace was visited and left. Windows a workspace on
+    /// screen also holds stay. Returns how many were put away.</summary>
+    public int PutAwayUndisplayed()
+    {
+        var keep = WindowsOf(Displayed);
+        var put = 0;
+        foreach (var ws in state.Workspaces.Where(w => !IsDisplayed(w.Id)))
+        {
+            var before = hiddenAt.Count;
+            Capture(ws);
+            PutAwayAll(ws, keep);
+            put += hiddenAt.Count - before;
+        }
+        if (put > 0) Save();
+        return put;
+    }
+
     void PutAwayAll(Workspace ws, HashSet<long> keep)
     {
         foreach (var t in ws.Tabs)
@@ -242,6 +261,9 @@ public sealed class WorkspaceManager
             if (platform.Describe(h) is { } info && info.AppID == tab.AppID && Open(info)) return info;
             tab.Hwnd = null;
         }
+        // Closed while its workspace slept: only the window reopened for it will do (see
+        // BindReopened), not some other window of the app.
+        if (tab.Slept is not null) return null;
         var held = state.Workspaces.SelectMany(w => w.Tabs)
             .Where(t => t.Id != tab.Id && t.Hwnd is not null && t.Shared != true)
             .Select(t => t.Hwnd!.Value).ToHashSet();
@@ -272,6 +294,37 @@ public sealed class WorkspaceManager
         tab.Title = w.Title;
         tab.ClassName = w.ClassName;
         tab.ExePath = w.ExePath ?? tab.ExePath;
+    }
+
+    /// <summary>A window reopened for a tab whose window was closed while its workspace slept:
+    /// bind it, put it back where the old one was, and out of sight again if the workspace is
+    /// no longer on screen.</summary>
+    public void BindReopened(AppTab tab, WindowInfo w)
+    {
+        var placement = tab.Slept;
+        tab.Slept = null;
+        Bind(tab, w);
+        var ws = WorkspaceOf(tab);
+        var monitors = platform.Monitors();
+        if (placement is not null)
+            platform.ApplyLayout([(w.Hwnd, Place(placement, monitors, ws is null ? null : DisplayOf(ws, monitors)))]);
+        if (ws is not null && !IsDisplayed(ws.Id) && !w.Locked) PutAway(w.Hwnd, w.AppID);
+        Save();
+        Changed?.Invoke();
+    }
+
+    public Workspace? WorkspaceOf(AppTab tab) => state.Workspaces.Find(w => w.Tabs.Contains(tab));
+
+    public bool IsDisplayed(Guid id) => id == Current.Id || Others.ContainsValue(id);
+
+    /// <summary>Processes TabStack has in efficiency mode (saved with the state).</summary>
+    public List<ThrottledProcess> Throttled => state.Throttled ??= new();
+
+    /// <summary>Save and redraw after something outside changed workspaces or tabs.</summary>
+    public void Commit()
+    {
+        Save();
+        Changed?.Invoke();
     }
 
     /// <summary>Tabs bound to a window, in any workspace.</summary>
@@ -674,6 +727,9 @@ public sealed class WorkspaceManager
     public void RenameWorkspace(Guid id, string name) => Edit(id, w => w.Name = name);
     public void SetColor(Guid id, int color) => Edit(id, w => w.Color = color);
     public void SetPinned(Guid id, bool pinned) { Edit(id, w => w.Pinned = pinned ? true : null); RecomputeActive(); }
+    public void SetNoSleep(Guid id, bool on) => Edit(id, w => w.NoSleep = on ? true : null);
+    public void SetTabNoSleep(Guid tabID, bool on) =>
+        Edit(Current.Id, w => { if (w.Tab(tabID) is { } t) t.NoSleep = on ? true : null; });
 
     /// <summary>Deletes a workspace; its hidden windows are shown again. The last one can't go.</summary>
     public void DeleteWorkspace(Guid id)

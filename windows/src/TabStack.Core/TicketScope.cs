@@ -13,23 +13,7 @@ public static class TicketScope
         if (name.Length == 0) return false;
         if (string.Equals(ws.Name.Trim(), name, StringComparison.OrdinalIgnoreCase)) return true;
         return ws.Tabs.Any(t =>
-            Names(t.Title, name) || Names(t.CustomName, name)
+            Words.Has(t.Title, name) || Words.Has(t.CustomName, name)
             || (t.Title?.Contains(projectPath, StringComparison.OrdinalIgnoreCase) ?? false));
-    }
-
-    /// <summary>Whether <paramref name="text"/> has <paramref name="name"/> as a word of its own
-    /// (so "TabStack" is not found in "TabStackOverflow").</summary>
-    static bool Names(string? text, string name)
-    {
-        if (string.IsNullOrEmpty(text)) return false;
-        for (var i = text.IndexOf(name, StringComparison.OrdinalIgnoreCase); i >= 0;
-             i = text.IndexOf(name, i + 1, StringComparison.OrdinalIgnoreCase))
-        {
-            var before = i == 0 || !char.IsLetterOrDigit(text[i - 1]);
-            var end = i + name.Length;
-            var after = end == text.Length || !char.IsLetterOrDigit(text[end]);
-            if (before && after) return true;
-        }
-        return false;
     }
 }

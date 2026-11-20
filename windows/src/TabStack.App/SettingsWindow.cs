@@ -16,6 +16,11 @@ sealed class SettingsWindow : Window
     readonly TextBox limitBox = new() { Width = 48 };
     readonly CheckBox startAtLogin = new() { Content = "Start TabStack when I sign in to Windows", Margin = new Thickness(0, 0, 0, 4) };
     readonly Dictionary<string, CheckBox> monitorBoxes = new();
+    readonly CheckBox sleepBox = new() { Content = "Put workspaces I'm not using to sleep (their apps run in efficiency mode)" };
+    readonly TextBox sleepAfter = new() { Width = 40 };
+    readonly TextBox awakeCount = new() { Width = 40 };
+    readonly CheckBox closeLow = new() { Margin = new Thickness(0, 4, 0, 0) };
+    readonly TextBox lowPercent = new() { Width = 40 };
     readonly TextBlock status = new() { Foreground = Brushes.Firebrick, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
 
     WorkspaceManager M => shell.Manager;
@@ -53,6 +58,24 @@ sealed class SettingsWindow : Window
                 root.Children.Add(box);
             }
         }
+
+        root.Children.Add(Header("Sleep"));
+        var s = M.Settings;
+        sleepBox.IsChecked = s.Sleep;
+        root.Children.Add(sleepBox);
+        sleepAfter.Text = s.SleepAfterMinutes.ToString();
+        awakeCount.Text = s.AwakeWorkspaces.ToString();
+        lowPercent.Text = s.MemoryLowPercent.ToString();
+        root.Children.Add(Row(12, "After ", sleepAfter, " minutes away; the ", awakeCount, " most used workspaces stay awake"));
+        closeLow.IsChecked = s.CloseWhenMemoryLow;
+        closeLow.Content = Row(0, "When over ", lowPercent, " % of memory is in use, close sleeping VS Code and File Explorer windows (they reopen when you come back)");
+        closeLow.Margin = new Thickness(12, 4, 0, 0);
+        root.Children.Add(closeLow);
+        root.Children.Add(new TextBlock
+        {
+            Text = "Pinned workspaces, and tabs or workspaces marked “Never Sleep” (right-click), are left alone, as are apps playing sound.",
+            TextWrapping = TextWrapping.Wrap, Foreground = Brushes.Gray, Margin = new Thickness(12, 4, 0, 0),
+        });
 
         root.Children.Add(Header("Hotkeys (click a box, then press the keys; Backspace clears)"));
         var grid = new Grid();
@@ -118,6 +141,15 @@ sealed class SettingsWindow : Window
         Text = text, FontWeight = FontWeights.SemiBold, FontSize = 14, Margin = new Thickness(0, 12, 0, 6),
     };
 
+    /// <summary>Text and boxes in one line.</summary>
+    static StackPanel Row(double indent, params object[] parts)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(indent, 4, 0, 0) };
+        foreach (var p in parts)
+            row.Children.Add(p as UIElement ?? new TextBlock { Text = (string)p, VerticalAlignment = VerticalAlignment.Center });
+        return row;
+    }
+
     static void Capture(TextBox box, KeyEventArgs e)
     {
         e.Handled = true;
@@ -132,6 +164,14 @@ sealed class SettingsWindow : Window
         if (!int.TryParse(limitBox.Text, out var limit) || limit is < 1 or > 30)
         {
             status.Text = "Enter a number of workspaces from 1 to 30.";
+            return;
+        }
+        if (!int.TryParse(sleepAfter.Text, out var after) || after is < 1 or > 1440
+            || !int.TryParse(awakeCount.Text, out var awake) || awake is < 0 or > 30
+            || !int.TryParse(lowPercent.Text, out var low) || low is < 30 or > 99)
+        {
+            status.Foreground = Brushes.Firebrick;
+            status.Text = "Sleep: minutes from 1 to 1440, workspaces kept awake from 0 to 30, memory from 30 to 99 %.";
             return;
         }
         if (monitorBoxes.Count > 0 && monitorBoxes.Values.All(b => b.IsChecked != true))
@@ -149,6 +189,11 @@ sealed class SettingsWindow : Window
             s.NoSidebarMonitors = noSidebar;
             s.MinimizeApps = minimizeList.Items.Cast<string>().ToList();
             s.StartAtLogin = startAtLogin.IsChecked == true;
+            s.Sleep = sleepBox.IsChecked == true;
+            s.SleepAfterMinutes = after;
+            s.AwakeWorkspaces = awake;
+            s.CloseWhenMemoryLow = closeLow.IsChecked == true;
+            s.MemoryLowPercent = low;
             s.HotKeys = HotKeyMap.All
                 .Where(a => chordBoxes[a.Id].Text != a.Default)
                 .ToDictionary(a => a.Id, a => chordBoxes[a.Id].Text);

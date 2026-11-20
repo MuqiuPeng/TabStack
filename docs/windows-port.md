@@ -133,7 +133,7 @@ AppTab {
 **进程级约束**：该进程的所有 tab 窗口都属于休眠候选 workspace 才能动。以下一律跳过：当前或其他显示器正在显示的 workspace 用到的进程、`shared` tab、`noSleep`、提权进程、正在播放音频（`IAudioSessionManager2` 枚举活跃会话）。
 
 ### 6.3 触发策略
-- 最近使用的 **K=3** 个 workspace 与 pinned 的保持唤醒。
+- 最常用（frecency 最高）的 **K=3** 个 workspace 与 pinned 的保持唤醒。
 - 离开超过 **N=15 分钟** → L1。
 - 内存压力（`CreateMemoryResourceNotification(LowMemoryResourceNotification)` 或 `GlobalMemoryStatusEx.dwMemoryLoad > 80%`）→ 按 Frecency 从低到高对候选执行 L4/L5，直到压力解除。
 - K、N、阈值、L4 开关都放进设置。
@@ -211,8 +211,15 @@ AppTab {
   - 跳到会话、新开会话用 Claude 自己注册的 `claude://code/continue` 与 `claude://code/new` 链接。
   - 需要先在 TicketDeck 目录运行 `ticketdeck setup --root E:\projects`。
 
+- **P2 休眠完成**（`Sleeper` + `WindowsSleep`，9 个单测）：
+  - 工作区离开屏幕满 N 分钟（默认 15）后休眠；在屏幕上的、固定的、标了“Never Sleep”的，以及最常用的 K 个（默认 3，按 frecency）不休眠。每 30 秒评估一次，切换工作区时立即唤醒。
+  - L1：进程连同子进程设为空闲优先级 + EcoQoS（任务管理器显示“效率模式”），唤醒时恢复原优先级。只有当这个进程的所有标签窗口都属于休眠中的工作区、没有共享或“Never Sleep”的标签、在屏幕上没有未最小化的窗口、没在放声音（Core Audio 会话）时才动；explorer.exe 不动。动过的进程记在 state.json，TabStack 崩溃或被强杀后，下次启动时恢复。
+  - L4：内存占用超过阈值（默认 80%）时，关闭最少用的休眠工作区里能原样重开的窗口：VS Code 及其分支（按标题里的项目名，到 `Backups\workspaces.json` / `storage.json` 里找文件夹或 .code-workspace），资源管理器（Shell COM 读路径，多标签页的窗口不关）。关之前记下位置；切回该工作区或点它的标签时，用 `Code.exe --new-window <文件夹>` / `explorer.exe <路径>` 重开，绑回原标签、放回原处（期间又切走了，就重新收起）。标题带“●”（有未保存修改）的 VS Code 窗口不关；20 秒内没关掉（在问是否保存）就当没关。
+  - 侧边栏：被 L4 关掉的标签图标右下角显示 ☾，提示可点击重开；工作区列表里休眠的工作区名后加 ☾。标签和工作区的右键菜单可设“Never Sleep”。设置窗口新增“Sleep”一节。
+  - 实机：进程树进入、退出效率模式；声音会话读取；资源管理器窗口读路径、关闭、重开。用临时状态和真实窗口跑了完整流程（字符映射表 L1、资源管理器 L4、切回后唤醒、重开、绑定、位置不变）。本机没有在用 VS Code，VS Code 的重开配方没在真机上验证。
+- 启动时收起不在屏幕上的工作区的窗口：退出（以及崩溃后看门狗）会把隐藏的窗口都放出来，以前重新启动后这些窗口一直留在屏幕上（也因此不会休眠），要切到那个工作区再切走才会收起。现在启动时就收起，屏幕上的工作区也有的窗口（共享）不动。实测重启后收起了 Dev、Jobs 的 5 个窗口。
+
 - **尚缺**（合并进 main 之前）：
-  - P2 休眠整段未开始：L1 效率模式、L4 关闭重开（L4 依赖的 Reopen 配方——VS Code 文件夹、资源管理器路径——也还没做）、触发策略、设置项、侧边栏休眠状态。
   - P3：MCP 服务器（命名管道）和浏览器扩展（标签页丢弃 + URL 上报）。
   - 跟进 main 的 `038642e`：切换工作区时延后整理窗口、最小化放到后台做（同一提交里“应用重启后图标变灰”的问题 Windows 版已另行处理）。
   - `windows/README.md` 已过时，需按现状重写。
