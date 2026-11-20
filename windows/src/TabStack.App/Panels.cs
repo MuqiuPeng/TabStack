@@ -34,6 +34,18 @@ sealed class Panels
         open.Show();
     }
 
+    TicketPanel? tickets;
+
+    /// <summary>Ctrl+Alt+T: the TicketDeck panel; the same key again closes it.</summary>
+    public void Tickets()
+    {
+        if (open is { IsLoaded: true }) open.Close();
+        if (tickets is { IsLoaded: true }) { tickets.Dismiss(); return; }
+        tickets = new TicketPanel(shell, FocusedDisplay);
+        tickets.Closed += (s, _) => { if (ReferenceEquals(tickets, s)) tickets = null; };
+        tickets.Show();
+    }
+
     // ───────────── Ctrl+Alt+F: workspaces ─────────────
 
     public void Search() => Show("search", "Go to workspace…", query =>

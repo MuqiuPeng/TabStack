@@ -50,6 +50,7 @@ public sealed class AppShell
             if (hotkeys?.WndProc((uint)msg, wParam) == true) handled = true;
             return 0;
         });
+        Autostart.Apply(manager.Settings.StartAtLogin);
         manager.AssignDisplays();
         SyncSidebars();
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaysChanged;
@@ -213,6 +214,7 @@ public sealed class AppShell
             case "nextWorkspace": m.SwitchRelative(1); break;
             case "addWindow": panels.QuickAdd(); break;
             case "search": panels.Search(); break;
+            case "tickets": panels.Tickets(); break;
             case "closeWindow": CloseForeground(); break;
             case "toggleSidebar": ToggleSidebars(); break;
         }

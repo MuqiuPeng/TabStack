@@ -26,6 +26,7 @@ static class HotKeyMap
         list.Add(new("addWindow", "Add a window or app to the workspace…", "Ctrl+Alt+A"));
         list.Add(new("search", "Go to workspace…", "Ctrl+Alt+F"));
         list.Add(new("closeWindow", "Close the active window", "Ctrl+Alt+D"));
+        list.Add(new("tickets", "TicketDeck tickets and today's plan", "Ctrl+Alt+T"));
         list.Add(new("toggleSidebar", "Show or hide the sidebar", "Ctrl+Alt+0"));
         return list;
     }

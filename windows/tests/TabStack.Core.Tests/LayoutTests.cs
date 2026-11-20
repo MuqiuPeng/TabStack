@@ -82,3 +82,28 @@ public sealed class AppIdTests
         finally { Directory.Delete(root, true); }
     }
 }
+
+public sealed class TicketScopeTests
+{
+    static Workspace Ws(string name, params string[] titles) =>
+        new() { Name = name, Tabs = titles.Select(t => new AppTab { AppID = "x", Title = t }).ToList() };
+
+    [Fact]
+    public void AWorkspaceNamedLikeTheProjectHoldsIt() =>
+        Assert.True(TicketScope.Holds(Ws("tabstack"), @"E:\projects\TabStack"));
+
+    [Fact]
+    public void WindowTitlesNamingTheFolderHoldIt()
+    {
+        Assert.True(TicketScope.Holds(Ws("Dev", "WorkspaceManager.cs - TabStack - Visual Studio Code"), @"E:\projects\TabStack"));
+        Assert.True(TicketScope.Holds(Ws("Dev", @"pwsh: E:\projects\TicketDeck\src"), @"E:\projects\TicketDeck"));
+        Assert.True(TicketScope.Holds(Ws("Dev", "TicketDeck"), @"E:\projects\TicketDeck\"));
+    }
+
+    [Fact]
+    public void APartOfAnotherWordDoesNot()
+    {
+        Assert.False(TicketScope.Holds(Ws("Dev", "TabStackOverflow - Chrome"), @"E:\projects\TabStack"));
+        Assert.False(TicketScope.Holds(Ws("Life", "微信", "Spotify"), @"E:\projects\TabStack"));
+    }
+}
