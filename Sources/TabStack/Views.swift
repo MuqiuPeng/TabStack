@@ -48,6 +48,7 @@ struct SidebarView: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(WorkspaceManager.autoHideKey) private var floating = false
 
     var body: some View {
         VStack(spacing: 6) {
@@ -83,9 +84,9 @@ struct SidebarView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: manager.trusted)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(VisualEffect())
+        .background(floating ? nil : VisualEffect())
         .overlay(alignment: .trailing) {
-            Rectangle().fill(Color.primary.opacity(0.1)).frame(width: 1)
+            if !floating { Rectangle().fill(Color.primary.opacity(0.1)).frame(width: 1) }
         }
     }
 
@@ -330,8 +331,11 @@ struct TabButton: View {
                             .transition(.opacity)
                     }
                     if selected {
+                        // Opaque: the tint sits on a solid base, so the frosted sidebar
+                        // does not show through the highlight.
                         RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.accentColor.opacity(0.28))
+                            .fill(Color(nsColor: .windowBackgroundColor))
+                            .overlay(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.28)))
                             .matchedGeometryEffect(id: matchID, in: selectionNS)
                     }
                 }
@@ -591,16 +595,69 @@ enum WindowPicker {
 }
 
 struct VisualEffect: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .sidebar
+    /// Rounds the blur itself (a SwiftUI clip does not reach a behind-window blur).
+    var cornerRadius: CGFloat = 0
+
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
-        v.material = .sidebar
         v.blendingMode = .behindWindow
         v.state = .active
+        updateNSView(v, context: context)
         return v
     }
 
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+    func updateNSView(_ v: NSVisualEffectView, context: Context) {
+        v.material = material
+        v.maskImage = cornerRadius > 0 ? Self.mask(cornerRadius) : nil
+    }
+
+    private static func mask(_ r: CGFloat) -> NSImage {
+        let size = NSSize(width: r * 2 + 1, height: r * 2 + 1)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: r, yRadius: r).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: r, left: r, bottom: r, right: r)
+        image.resizingMode = .stretch
+        return image
+    }
 }
+
+/// Liquid Glass behind the floating sidebar: the content behind it is refracted (bent and
+/// magnified toward the edges) as well as blurred. Falls back to the frosted material on
+/// systems without it.
+struct GlassBackground: View {
+    var cornerRadius: CGFloat
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            Glass(cornerRadius: cornerRadius)
+        } else {
+            VisualEffect(material: .hudWindow, cornerRadius: cornerRadius)
+        }
+    }
+
+    @available(macOS 26.0, *)
+    private struct Glass: NSViewRepresentable {
+        var cornerRadius: CGFloat
+
+        func makeNSView(context: Context) -> NSGlassEffectView {
+            let v = NSGlassEffectView()
+            updateNSView(v, context: context)
+            return v
+        }
+
+        func updateNSView(_ v: NSGlassEffectView, context: Context) {
+            v.cornerRadius = cornerRadius
+            v.style = .clear
+        }
+    }
+}
+
+/// Corner radius of the floating (auto-hide) sidebar.
+let floatingSidebarRadius: CGFloat = 14
 
 // MARK: Expanded workspace list
 
@@ -609,6 +666,8 @@ struct VisualEffect: NSViewRepresentable {
 struct SidebarRoot: View {
     @ObservedObject var manager: WorkspaceManager
     @Environment(\.sidebarDisplay) private var display
+    /// Auto-hide: a floating, rounded frosted card like the Dock instead of a full-height strip.
+    @AppStorage(WorkspaceManager.autoHideKey) private var floating = false
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -622,8 +681,15 @@ struct SidebarRoot: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(VisualEffect())
-        .onHover { manager.hoveringSidebar = $0 }
+        .background {
+            if floating { GlassBackground(cornerRadius: floatingSidebarRadius) } else { VisualEffect() }
+        }
+        .overlay {
+            if floating {
+                RoundedRectangle(cornerRadius: floatingSidebarRadius, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+            }
+        }
         .animation(.easeInOut(duration: Motion.reduce ? 0.1 : 0.18), value: manager.expanded && display == manager.focusedDisplay)
     }
 }

@@ -321,6 +321,7 @@ private struct GeneralSettings: View {
     @AppStorage(WorkspaceManager.onlyThisWorkspaceKey) private var onlyThisWorkspace = true
     @AppStorage(WorkspaceManager.switchDelayKey) private var switchDelay = 0.4
     @AppStorage("activeWorkspaceLimit") private var limit = 5
+    @AppStorage(WorkspaceManager.autoHideKey) private var autoHide = false
     @AppStorage("splitMinWidth") private var splitMinWidth = 2400.0
 
     private var widthHint: String {
@@ -348,6 +349,11 @@ private struct GeneralSettings: View {
             }
 
             Section("侧边栏") {
+                Toggle("自动隐藏侧边栏", isOn: $autoHide)
+                    .onChange(of: autoHide) { _ in manager.onAutoHideChanged?() }
+                Text("窗口铺满整个屏幕，鼠标贴到屏幕左边缘停一下侧边栏就会滑出，离开后自动收起；用快捷键切换工作区时也会短暂滑出。左边紧挨着另一块屏幕时那条边不会触发，可以按 ⌥⌘0 滑出。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 Stepper("最多显示 \(limit) 个工作区", value: Binding(
                     get: { limit },
                     set: { limit = $0; manager.recomputeActive() }), in: 2...9)

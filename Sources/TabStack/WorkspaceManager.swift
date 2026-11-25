@@ -181,8 +181,17 @@ final class WorkspaceManager: ObservableObject {
     var sidebarShown = true
     /// The sidebar is temporarily showing the full workspace list (keyboard switching).
     @Published var expanded = false
-    /// Mouse is over the sidebar; keeps the expanded list open.
-    var hoveringSidebar = false
+    /// Mouse is over the sidebar; keeps the expanded list open. Asked of the app delegate
+    /// each time (pointer position against the panel frame) rather than tracked with
+    /// SwiftUI's onHover, whose exit event is lost when the panel widens under a resting
+    /// pointer — the list then never folded and keyboard switches stopped applying.
+    var hoveringSidebar: Bool { pointerOnSidebar?() ?? false }
+    /// Set by the app delegate, which owns the panels.
+    var pointerOnSidebar: (() -> Bool)?
+    /// Auto-hide sidebar (slides out from the left screen edge); off by default.
+    static let autoHideKey = "sidebarAutoHide"
+    /// The auto-hide setting changed. Set by the app delegate.
+    var onAutoHideChanged: (() -> Void)?
 
     private var iconCache: [String: NSImage] = [:]
     private var timer: Timer?

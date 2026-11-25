@@ -44,10 +44,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         manager.onExpandSidebar = { [weak self] in
             guard let self else { return }
-            if self.manager.expanded { self.collapseList(animated: true) } else { self.flashWorkspaceList() }
+            if self.manager.expanded { self.collapseList(animated: true) } else { self.flashWorkspaceList(fromKeyboard: false) }
         }
+        manager.pointerOnSidebar = { [weak self] in self?.pointerOnList() ?? false }
+        manager.onAutoHideChanged = { [weak self] in self?.autoHideChanged() }
+        manager.sidebarShown = !autoHide
         buildMainMenu()
         dock()
+        if autoHide { startEdgeWatch() }
         setUpStatusItem()
 
         NotificationCenter.default.addObserver(
@@ -113,7 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Opening TabStack again (Finder, Spotlight, Launchpad) brings the sidebar back.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if userHidden { toggleSidebar() }
+        if autoHide || userHidden { toggleSidebar() }
         return false
     }
 
@@ -172,10 +176,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         menu.autoenablesItems = false
 
-        let toggle = ClosureMenuItem(userHidden ? "显示侧边栏" : "隐藏侧边栏") { [weak self] in self?.toggleSidebar() }
+        let toggle = ClosureMenuItem(autoHide ? "滑出侧边栏" : userHidden ? "显示侧边栏" : "隐藏侧边栏") { [weak self] in self?.toggleSidebar() }
         toggle.keyEquivalent = "0"
         toggle.keyEquivalentModifierMask = [.command, .option]
         menu.addItem(toggle)
+        let auto = ClosureMenuItem("自动隐藏侧边栏") { [weak self] in
+            UserDefaults.standard.set(!(self?.autoHide ?? false), forKey: WorkspaceManager.autoHideKey)
+            self?.autoHideChanged()
+        }
+        auto.state = autoHide ? .on : .off
+        menu.addItem(auto)
         menu.addItem(.separator())
 
         let header = NSMenuItem(title: "工作区", action: nil, keyEquivalent: "")
@@ -217,11 +227,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return p
     }
 
-    /// The sidebar's place on a display: the left edge of its visible area.
+    /// The sidebar's place on a display: the left edge of its visible area. With auto-hide
+    /// it floats like the Dock: a little off the edge, with a small gap above and below.
     private func dockedFrame(_ display: DisplayKey) -> NSRect? {
         guard let vf = Displays.screen(display)?.visibleFrame else { return nil }
-        return NSRect(x: vf.minX, y: vf.minY, width: Layout.sidebarWidth, height: vf.height)
+        guard autoHide else {
+            return NSRect(x: vf.minX, y: vf.minY, width: Layout.sidebarWidth, height: vf.height)
+        }
+        return NSRect(x: vf.minX + Self.floatInset, y: vf.minY + Self.floatMargin,
+                      width: Layout.sidebarWidth, height: vf.height - 2 * Self.floatMargin)
     }
+
+    /// Gap between the floating sidebar and the screen edge.
+    private static let floatInset: CGFloat = 6
+    /// Gap above and below the floating sidebar (about half a centimeter).
+    private static let floatMargin: CGFloat = 24
 
     /// One sidebar on the left edge of every display that has a workspace.
     private func dock() {
@@ -230,13 +250,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for (d, p) in panels where !wanted.contains(d) {
             p.orderOut(nil)
             panels[d] = nil
+            shownPanels.remove(d)
         }
+        if let r = revealed, !wanted.contains(r) { revealed = nil }
         manager.expanded = false
         for d in wanted {
             let p = panels[d] ?? makePanel(for: d)
             panels[d] = p
             if let frame = dockedFrame(d) { p.setFrame(frame, display: true) }
-            if sidebarVisible { p.orderFrontRegardless() }
+            if wantsVisible(d) {
+                shownPanels.insert(d)
+                p.alphaValue = 1
+                p.orderFrontRegardless()
+            } else if !shownPanels.contains(d) {
+                p.orderOut(nil)
+            }
         }
     }
 
@@ -247,12 +275,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Widens the sidebar into the workspace list for a moment, so a keyboard switch shows
     /// where you are among all workspaces. Falls back to the centered HUD when the sidebar
     /// is hidden.
-    private func flashWorkspaceList() {
-        guard sidebarVisible, let panel, panel.isVisible else { showWorkspaceHUD(); return }
+    private func flashWorkspaceList(fromKeyboard: Bool = true) {
+        // Auto-hide: slide the sidebar out for the switch; it goes again once the list folds.
+        if autoHide, !fullScreenInFront { reveal(manager.focusedDisplay, grace: 0) }
+        guard shownPanels.contains(manager.focusedDisplay), let panel, panel.isVisible else { showWorkspaceHUD(); return }
+        // A pointer resting where the list happens to open is not choosing from it.
+        pointerAnchor = fromKeyboard ? NSEvent.mouseLocation : nil
         if !manager.expanded {
             manager.expanded = true
             let maxWidth = (panel.screen ?? NSScreen.screens.first)?.visibleFrame.width ?? 1200
-            resizePanel(panel, to: Layout.expandedWidth(columns: manager.activeWorkspaces.count, maxWidth: maxWidth * 0.9))
+            resizePanel(panel, display: manager.focusedDisplay, to: Layout.expandedWidth(columns: manager.activeWorkspaces.count, maxWidth: maxWidth * 0.9))
         }
         scheduleCollapse(after: 1.4)
     }
@@ -264,6 +296,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
+    /// Where the pointer was when the keyboard last opened the list; until it moves away
+    /// from there it does not count as hovering.
+    private var pointerAnchor: NSPoint?
+
+    /// The pointer is on the expanded list and has moved since the keyboard opened it.
+    /// Checked against the panel's frame, so it cannot get stuck the way hover tracking can.
+    private func pointerOnList() -> Bool {
+        guard manager.expanded, let panel, panel.isVisible else { return false }
+        let p = NSEvent.mouseLocation
+        guard panel.frame.contains(p) else { return false }
+        if let a = pointerAnchor {
+            if hypot(p.x - a.x, p.y - a.y) < 4 { return false }
+            pointerAnchor = nil
+        }
+        return true
+    }
+
     /// Stays open while the mouse is over it, so a row can be clicked.
     private func collapseIfIdle() {
         if manager.hoveringSidebar { scheduleCollapse(after: 0.6); return }
@@ -273,13 +322,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func collapseList(animated: Bool) {
         collapseWork?.cancel()
         manager.expanded = false
-        for p in panels.values where p.frame.width != Layout.sidebarWidth {
-            resizePanel(p, to: Layout.sidebarWidth, animated: animated)
+        for (d, p) in panels where p.frame.width != Layout.sidebarWidth {
+            resizePanel(p, display: d, to: Layout.sidebarWidth, animated: animated)
         }
     }
 
-    private func resizePanel(_ panel: NSPanel, to width: CGFloat, animated: Bool = true) {
-        var frame = panel.frame
+    /// Resizes from the docked position, so it also takes over a slide-in still under way.
+    private func resizePanel(_ panel: NSPanel, display: DisplayKey, to width: CGFloat, animated: Bool = true) {
+        var frame = shownPanels.contains(display) ? (dockedFrame(display) ?? panel.frame) : panel.frame
         frame.size.width = width
         guard animated, !Motion.reduce else { panel.setFrame(frame, display: true); return }
         NSAnimationContext.runAnimationGroup { ctx in
@@ -301,7 +351,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var userHidden = false
     private var fullScreenInFront = false
 
+    /// ⌥⌘0: shows / hides the sidebar; with auto-hide on, slides it out for a while instead.
     private func toggleSidebar() {
+        if autoHide {
+            if revealed == nil { reveal(manager.focusedDisplay, grace: Self.peekGrace) } else { conceal() }
+            return
+        }
         userHidden.toggle()
         manager.sidebarShown = !userHidden
         updateVisibility(animated: true)
@@ -310,27 +365,153 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateVisibility(animated: Bool = false) {
         if let fs = AX.frontmostIsFullScreen() { fullScreenInFront = fs }
-        setSidebar(visible: !userHidden && !fullScreenInFront, animated: animated)
+        if fullScreenInFront { revealed = nil }
+        applyVisibility(animated: animated)
     }
 
-    /// The visibility the sidebar is heading to (it may still be mid-slide).
-    private var sidebarVisible = true
+    /// Displays whose sidebar is shown or sliding in.
+    private var shownPanels: Set<DisplayKey> = []
 
-    /// Slides the sidebar in from / out to the left screen edge. Full-screen changes are
-    /// not animated: macOS is already animating its Space transition then.
-    private func setSidebar(visible: Bool, animated: Bool) {
-        guard visible != sidebarVisible else { return }
-        sidebarVisible = visible
-        if !visible { collapseList(animated: false) }
+    private func wantsVisible(_ d: DisplayKey) -> Bool {
+        if fullScreenInFront { return false }
+        if autoHide { return revealed == d }
+        return !userHidden
+    }
+
+    /// Slides each sidebar in from / out to the left screen edge as needed. Full-screen
+    /// changes are not animated: macOS is already animating its Space transition then.
+    private func applyVisibility(animated: Bool) {
         for (d, panel) in panels {
-            guard let docked = dockedFrame(d) else { continue }
-            slide(panel, docked: docked, visible: visible, animated: animated)
+            let visible = wantsVisible(d)
+            guard visible != shownPanels.contains(d), let docked = dockedFrame(d) else { continue }
+            if visible { shownPanels.insert(d) } else {
+                shownPanels.remove(d)
+                if manager.expanded, d == manager.focusedDisplay { collapseList(animated: false) }
+            }
+            slide(panel, display: d, docked: docked, visible: visible, animated: animated)
         }
     }
 
-    private func slide(_ panel: NSPanel, docked: NSRect, visible: Bool, animated: Bool) {
+    // MARK: Auto-hide
+
+    /// Pointer within this many points of a display's left edge counts as touching it.
+    private static let edgeBand: CGFloat = 2
+    /// How long the pointer rests on the edge before the sidebar slides out.
+    private static let edgeDwell: TimeInterval = 0.2
+    /// How long the pointer is away from the sidebar before it slides back.
+    private static let leaveDelay: TimeInterval = 0.5
+    /// Extra time a sidebar brought out with ⌥⌘0 waits for the pointer.
+    private static let peekGrace: TimeInterval = 2.5
+
+    private var autoHide: Bool { UserDefaults.standard.bool(forKey: WorkspaceManager.autoHideKey) }
+    /// The display whose auto-hidden sidebar is slid out.
+    private var revealed: DisplayKey?
+    private var edgeMonitors: [Any] = []
+    private var dwellWork: DispatchWorkItem?
+    private var leaveTimer: Timer?
+    /// Last moment the sidebar had a reason to stay (pointer on it, list open).
+    private var lastWanted = Date()
+
+    private func autoHideChanged() {
+        revealed = nil
+        for p in panels.values { p.invalidateShadow() }
+        if autoHide { startEdgeWatch() } else { stopEdgeWatch() }
+        manager.sidebarShown = autoHide ? false : !userHidden
+        applyVisibility(animated: true)
+        manager.layoutChanged()
+    }
+
+    private func startEdgeWatch() {
+        guard edgeMonitors.isEmpty else { return }
+        let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged]
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] _ in self?.pointerMoved() }) {
+            edgeMonitors.append(m)
+        }
+        if let m = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] e in self?.pointerMoved(); return e }) {
+            edgeMonitors.append(m)
+        }
+    }
+
+    private func stopEdgeWatch() {
+        edgeMonitors.forEach(NSEvent.removeMonitor)
+        edgeMonitors = []
+        dwellWork?.cancel()
+        leaveTimer?.invalidate()
+        leaveTimer = nil
+    }
+
+    /// The display whose free left edge the pointer is touching. An edge shared with a
+    /// display to its left is skipped, so crossing between displays does not trigger it.
+    private func edgeDisplay(at p: NSPoint) -> DisplayKey? {
+        for s in NSScreen.screens {
+            let f = s.frame
+            guard p.y >= f.minY, p.y < f.maxY, p.x >= f.minX, p.x < f.minX + Self.edgeBand else { continue }
+            let neighbor = NSScreen.screens.contains { o in
+                o != s && abs(o.frame.maxX - f.minX) < 1 && p.y >= o.frame.minY && p.y < o.frame.maxY
+            }
+            return neighbor ? nil : Displays.key(s)
+        }
+        return nil
+    }
+
+    private func pointerMoved() {
+        guard autoHide, revealed == nil, !fullScreenInFront else { dwellWork?.cancel(); dwellWork = nil; return }
+        guard let d = edgeDisplay(at: NSEvent.mouseLocation), panels[d] != nil else {
+            dwellWork?.cancel(); dwellWork = nil; return
+        }
+        guard dwellWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.dwellWork = nil
+            guard self.revealed == nil, self.edgeDisplay(at: NSEvent.mouseLocation) == d,
+                  NSEvent.pressedMouseButtons == 0 else { return }
+            self.reveal(d, grace: 0)
+        }
+        dwellWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.edgeDwell, execute: work)
+    }
+
+    /// Slides the auto-hidden sidebar out over the windows (no relayout) on one display.
+    private func reveal(_ d: DisplayKey, grace: TimeInterval) {
+        guard panels[d] != nil else { return }
+        lastWanted = Date().addingTimeInterval(grace)
+        if revealed != d {
+            if revealed != nil { revealed = nil; applyVisibility(animated: true) }
+            revealed = d
+            applyVisibility(animated: true)
+        }
+        guard leaveTimer == nil else { return }
+        // Default run loop mode only: the timer pauses while a context menu is open.
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.checkLeave() }
+        RunLoop.main.add(t, forMode: .default)
+        leaveTimer = t
+    }
+
+    private func checkLeave() {
+        guard let d = revealed, let p = panels[d] else { conceal(); return }
+        let pt = NSEvent.mouseLocation
+        // The panel, plus the gap between it and the screen edge.
+        let screenMinX = Displays.screen(d)?.frame.minX ?? p.frame.minX
+        let onIt = (pt.x >= screenMinX && pt.x <= p.frame.maxX + 1 && pt.y >= p.frame.minY && pt.y <= p.frame.maxY)
+            || edgeDisplay(at: pt) == d
+        if onIt || manager.expanded || NSEvent.pressedMouseButtons != 0 {
+            lastWanted = max(lastWanted, Date())
+        } else if Date().timeIntervalSince(lastWanted) >= Self.leaveDelay {
+            conceal()
+        }
+    }
+
+    private func conceal() {
+        leaveTimer?.invalidate()
+        leaveTimer = nil
+        guard revealed != nil else { return }
+        revealed = nil
+        applyVisibility(animated: true)
+    }
+
+    private func slide(_ panel: NSPanel, display: DisplayKey, docked: NSRect, visible: Bool, animated: Bool) {
         // Reduce Motion: fade in place instead of sliding.
-        let away = Motion.reduce ? docked : docked.offsetBy(dx: -Layout.sidebarWidth, dy: 0)
+        let away = Motion.reduce ? docked : docked.offsetBy(dx: -(docked.width + Self.floatInset + 2), dy: 0)
 
         guard animated else {
             if visible { panel.setFrame(docked, display: true); panel.alphaValue = 1; panel.orderFrontRegardless() }
@@ -357,7 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 panel.animator().setFrame(away, display: true)
                 panel.animator().alphaValue = 0
             }, completionHandler: { [weak self] in
-                guard let self, !self.sidebarVisible else { return }
+                guard let self, !self.shownPanels.contains(display) else { return }
                 panel.orderOut(nil)
                 panel.setFrame(docked, display: false)
                 panel.alphaValue = 1
