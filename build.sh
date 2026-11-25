@@ -13,7 +13,9 @@ fi
 # UNIVERSAL=1 builds for both Apple silicon and Intel (used for releases).
 if [[ "${UNIVERSAL:-}" == "1" ]]; then
     swift build -c release --arch arm64 --arch x86_64
+    # Older toolchains put universal builds under .build/apple, newer ones under .build/out.
     BIN=.build/apple/Products/Release
+    [[ -x "$BIN/TabStack" ]] || BIN=.build/out/Products/Release
 else
     swift build -c release
     BIN=.build/release
