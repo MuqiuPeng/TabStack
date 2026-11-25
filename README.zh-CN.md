@@ -2,6 +2,10 @@
 
 > English: [README.md](README.md)
 
+![TabStack 演示：用 ⌃⌥ 快捷键切换工作区、搜索、添加窗口、查看工单](docs/media/tabstack-demo.gif)
+
+[观看 MP4 版本](docs/media/tabstack-demo.mp4) · 30 秒，无声。画面中的名称都是占位代号；图版是开普勒（1596）和雅姆尼策（1568）的公有领域版画。
+
 
 一个贴在屏幕左侧的窗口侧边栏，可以把常用窗口分成多个**工作区**，像 Chrome 的竖向标签一样一键切换。每个标签对应一个具体窗口，同一个应用（比如 Chrome）的多个窗口可以各占一个标签。
 

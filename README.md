@@ -2,6 +2,10 @@
 
 > 中文说明见 [README.zh-CN.md](README.zh-CN.md)
 
+![TabStack switching workspaces with ⌃⌥ shortcuts, searching, adding a window and showing tickets](docs/media/tabstack-demo.gif)
+
+[Watch the demo as MP4](docs/media/tabstack-demo.mp4) · 30 s, no sound. Every name on screen is a placeholder; the plates are public-domain prints by Kepler (1596) and Jamnitzer (1568).
+
 A sidebar docked to the left edge of your screen that groups windows into
 **workspaces** and switches between them with one click — like vertical browser
 tabs, but for every app. Each tab is one window, so a single Chrome can occupy
