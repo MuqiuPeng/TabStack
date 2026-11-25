@@ -6,10 +6,10 @@
 
 [Watch the demo as MP4](docs/media/tabstack-demo.mp4) · 30 s, no sound. Every name on screen is a placeholder; the plates are public-domain prints by Kepler (1596) and Jamnitzer (1568).
 
-A sidebar docked to the left edge of your screen that groups windows into
-**workspaces** and switches between them with one click — like vertical browser
-tabs, but for every app. Each tab is one window, so a single Chrome can occupy
-several tabs, each with its own title.
+TabStack is a sidebar for macOS that switches apps like vertical browser tabs.
+It docks to the left edge of the screen, groups windows into **workspaces** and
+switches between them with one click. Each tab is one window, so a single Chrome
+can occupy several tabs, each with its own title.
 
 ## How it works
 
