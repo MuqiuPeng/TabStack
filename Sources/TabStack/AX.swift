@@ -99,15 +99,22 @@ enum AX {
     }
 
     /// Like `windows(pid:)`, but also finds the windows that the AXWindows attribute leaves
-    /// out: a hidden app reports none there, so do apps whose windows sit on another Space.
-    /// When WindowServer knows of more windows than AXWindows returns, the app's AX elements
-    /// are looked up by id through a remote token (the lookup AltTab uses), with a time budget.
+    /// out: a hidden app reports none there, and windows on another Space (native full
+    /// screen included) are never listed there. When WindowServer knows of more windows than
+    /// AXWindows returns, the app's AX elements are looked up by id through a remote token
+    /// (the lookup AltTab uses), with a time budget.
+    ///
+    /// Element ids are handed out in order, so a long-running app's newest windows can sit
+    /// far up the range (Chrome's past 2000): the scan covers at least `hiddenScanLimit` ids
+    /// and goes on while elements keep turning up.
     ///
     /// The scan is remembered per process, so repeated calls stay cheap: windows it found are
     /// reused while they exist, a scan cut short by the budget resumes where it stopped, and
     /// ids a full scan could not find (some apps keep windows with no AX element) are not
     /// searched for again until a window id appears that has not been looked for yet.
-    static func windowsIncludingHidden(pid: pid_t) -> [AXUIElement] {
+    /// `wanted` is searched for even when an earlier scan could not find it (a window can be
+    /// out of reach for a moment, e.g. while it animates into full screen).
+    static func windowsIncludingHidden(pid: pid_t, wanted: CGWindowID? = nil) -> [AXUIElement] {
         var result = windows(pid: pid)
         var seen = Set(result.compactMap(windowID))
         let expected = serverWindowIDs(pid: pid)
@@ -120,6 +127,7 @@ enum AX {
         // Forget windows that closed, and those AXWindows reports again (the app was shown).
         scan.found = scan.found.filter { expected.contains($0.key) && !seen.contains($0.key) }
         scan.unresolved.formIntersection(expected.subtracting(seen))
+        if let wanted { scan.unresolved.remove(wanted) }
 
         for (id, w) in scan.found where windowID(w) == id {
             seen.insert(id)
@@ -133,7 +141,7 @@ enum AX {
         token.replaceSubrange(8..<12, with: withUnsafeBytes(of: UInt32(0x636f_636f)) { Data($0) })
         let deadline = Date().addingTimeInterval(0.1)
         var elementID = scan.resumeAt
-        while elementID < hiddenScanLimit, !missing.isSubset(of: seen) {
+        while elementID < max(hiddenScanLimit, scan.lastLive + hiddenScanMargin), !missing.isSubset(of: seen) {
             if Date() > deadline {
                 scan.resumeAt = elementID
                 return result
@@ -141,7 +149,10 @@ enum AX {
             token.replaceSubrange(12..<20, with: withUnsafeBytes(of: elementID) { Data($0) })
             elementID += 1
             guard let w = _AXUIElementCreateWithRemoteToken(token as CFData)?.takeRetainedValue(),
-                  isStandardEvenIfHidden(w), let id = windowID(w), !seen.contains(id) else { continue }
+                  let role: String = attr(w, kAXRoleAttribute) else { continue }
+            scan.lastLive = max(scan.lastLive, elementID - 1)
+            guard role == kAXWindowRole, isStandardEvenIfHidden(w),
+                  let id = windowID(w), !seen.contains(id) else { continue }
             seen.insert(id)
             scan.found[id] = w
             result.append(w)
@@ -156,8 +167,12 @@ enum AX {
         var found: [CGWindowID: AXUIElement] = [:]
         var unresolved: Set<CGWindowID> = []
         var resumeAt: UInt64 = 0
+        /// Highest element id that answered; the scan runs `hiddenScanMargin` past it.
+        var lastLive: UInt64 = 0
     }
     private static let hiddenScanLimit: UInt64 = 2000
+    /// Gaps between live elements measured up to ~600 ids (Chrome, WeChat).
+    private static let hiddenScanMargin: UInt64 = 1000
     private static var hiddenScans: [pid_t: HiddenScan] = [:]
     private static let hiddenScanLock = NSLock()
 
@@ -208,7 +223,15 @@ enum AX {
         return result
     }
 
-    private static func isOnSpace(_ id: CGWindowID) -> Bool {
+    /// One window of the app by its id, wherever it is: AXWindows first, then the
+    /// remote-token lookup (another Space, native full screen, a hidden app).
+    static func window(_ id: CGWindowID, pid: pid_t) -> AXUIElement? {
+        windowsIncludingHidden(pid: pid, wanted: id).first { windowID($0) == id }
+    }
+
+    /// Whether the window belongs to a Space: it is shown somewhere (a desktop or a
+    /// full-screen Space), as opposed to ordered out (closed but kept by its app).
+    static func isOnSpace(_ id: CGWindowID) -> Bool {
         let spaces = CGSCopySpacesForWindows(CGSMainConnectionID(), 0x7, [id] as CFArray)?
             .takeRetainedValue() as? [Any]
         return !(spaces ?? []).isEmpty
@@ -237,6 +260,69 @@ enum AX {
 
     static func title(_ w: AXUIElement) -> String {
         (attr(w, kAXTitleAttribute) as String?) ?? ""
+    }
+
+    /// Whether the app is frontmost, asked of the app itself: unlike `NSRunningApplication`'s
+    /// view, this doesn't wait for the activation notice to reach the main thread.
+    static func isFrontmost(_ app: NSRunningApplication) -> Bool {
+        (attr(AXUIElementCreateApplication(app.processIdentifier), kAXFrontmostAttribute) as Bool?) == true
+    }
+
+    /// Panels (an edge panel, a palette, a launcher's bar): windows an app keeps above its
+    /// document windows. `focusedWindow` passes over them to the app's main window.
+    static func isPanel(_ w: AXUIElement) -> Bool {
+        switch attr(w, kAXSubroleAttribute) as String? {
+        case kAXFloatingWindowSubrole?, kAXSystemFloatingWindowSubrole?, kAXSystemDialogSubrole?: return true
+        default: return false
+        }
+    }
+
+    /// Whether the app's focused window is one of its panels (see `isPanel`).
+    static func focusedIsPanel(pid: pid_t) -> Bool {
+        let app = AXUIElementCreateApplication(pid)
+        guard let w: AXUIElement = attr(app, kAXFocusedWindowAttribute) else { return false }
+        return isPanel(w)
+    }
+
+    /// Windows on screen, front to back, without the window server's own overlays.
+    private static func onScreenWindows() -> [[String: Any]] {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        return list.filter {
+            ($0[kCGWindowOwnerName as String] as? String) != "Window Server"
+                && (($0[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0
+        }
+    }
+
+    /// Apps that show a panel of their own (an edge panel, a palette): an on-screen window
+    /// of a level between document windows and the menu bar. Such a panel shows itself
+    /// again whenever its app likes, which un-hides the app and every window it has.
+    static func pidsShowingPanels() -> Set<pid_t> {
+        let screens = NSScreen.screens.map { toAX($0.frame) }
+        let menuBar = Int(CGWindowLevelForKey(.mainMenuWindow))
+        return Set(onScreenWindows().compactMap { info -> pid_t? in
+            guard let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue, layer > 0, layer < menuBar,
+                  let b = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: b), rect.width >= 4, rect.height >= 4,
+                  screens.contains(where: { $0.intersects(rect) }) else { return nil }
+            return (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+        })
+    }
+
+    /// Whether the pointer is on a window of the app above its document windows: a panel, a
+    /// palette, a status item. An app that comes forward meanwhile was clicked there (⌘Tab
+    /// and the Dock leave the pointer elsewhere; an edge panel only stays open while the
+    /// pointer is on it). Some apps come forward on such a click while AX goes on naming
+    /// their main window as the focused one.
+    static func pointerOnPanel(pid: pid_t) -> Bool {
+        guard let pointer = CGEvent(source: nil)?.location else { return false }
+        // The topmost window under the pointer.
+        guard let hit = onScreenWindows().first(where: { info in
+            (info[kCGWindowBounds as String] as? NSDictionary)
+                .flatMap { CGRect(dictionaryRepresentation: $0) }?.contains(pointer) ?? false
+        }) else { return false }
+        return (hit[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid
+            && ((hit[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0) > 0
     }
 
     static func focusedWindow(pid: pid_t) -> AXUIElement? {

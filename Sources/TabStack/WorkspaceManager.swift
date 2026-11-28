@@ -330,8 +330,8 @@ final class WorkspaceManager: ObservableObject {
                         icon: icon(for: tab.bundleID))
         if let next, let live = tabs.first(where: { $0.id == next.id }) {
             select(live, alsoHide: stillHere ? [] : [tab.bundleID])
-        } else if !stillHere {
-            runningApp(tab.bundleID)?.hide()
+        } else if !stillHere, let app = runningApp(tab.bundleID) {
+            putAway(app)
         }
     }
 
@@ -440,7 +440,8 @@ final class WorkspaceManager: ObservableObject {
             // Every app of another workspace is put away, not only those of the one left:
             // a window opened from elsewhere (a Notion page, say) must not linger here.
             let others = Set(allTabs.map(\.bundleID) + alsoHide).subtracting(shownApps)
-            for id in others { if let app = runningApp(id), !app.isHidden { app.hide() } }
+            let panels = AX.pidsShowingPanels()
+            for id in others { if let app = runningApp(id) { putAway(app, panels: panels) } }
             return
         }
 
@@ -497,7 +498,9 @@ final class WorkspaceManager: ObservableObject {
             for w in AX.windowsIncludingHidden(pid: app.processIdentifier) {
                 guard let wid = AX.windowID(w) else { continue }
                 let minimized = (AX.attr(w, kAXMinimizedAttribute) as Bool?) == true
-                if foreign.contains(wid), !minimized {
+                // A full-screen window keeps to its own Space, out of this desktop's way, and
+                // can't be minimized without leaving full screen.
+                if foreign.contains(wid), !minimized, !AX.isFullScreen(w) {
                     minimize.append((w, wid))
                 } else if keep.contains(wid), parked.contains(wid) {
                     if minimized { restore.append((w, wid)) } else { parked.remove(wid) }
@@ -542,6 +545,81 @@ final class WorkspaceManager: ObservableObject {
         if AX.set(w, kAXMinimizedAttribute, kCFBooleanTrue) {
             parked.insert(wid)
             saveParked()
+        }
+    }
+
+    /// Puts away an app of another workspace by hiding it. An app that shows a panel of its
+    /// own (an edge panel, a palette) is kept shown instead, with its windows parked, when
+    /// those are all tabs of other workspaces: the panel shows itself again whenever its app
+    /// likes, which would un-hide the app and bring back every window it has.
+    /// `panels`: `AX.pidsShowingPanels()`, when the caller already has it.
+    private func putAway(_ app: NSRunningApplication, panels: Set<pid_t>? = nil) {
+        guard !app.isHidden else { return }
+        if onlyThisWorkspace, AX.isTrusted,
+           (panels ?? AX.pidsShowingPanels()).contains(app.processIdentifier) {
+            let found = windowsElsewhere(of: app)
+            if !found.others {
+                parkShown(app, found.park)
+                return
+            }
+        }
+        app.hide()
+    }
+
+    /// The app's windows on screen that are tabs of other workspaces only; `others` tells
+    /// whether it has any further window on screen.
+    private func windowsElsewhere(of app: NSRunningApplication) -> (park: [(AXUIElement, CGWindowID)], others: Bool) {
+        let foreign = Set(allTabs.compactMap(\.windowID)).subtracting(shownWindowIDs)
+        var park: [(AXUIElement, CGWindowID)] = []
+        var others = false
+        for w in AX.windows(pid: app.processIdentifier) {
+            // A full-screen window keeps to its own Space and can't be minimized as it is.
+            guard (AX.attr(w, kAXMinimizedAttribute) as Bool?) != true, !AX.isFullScreen(w) else { continue }
+            if let wid = AX.windowID(w), foreign.contains(wid) { park.append((w, wid)) } else { others = true }
+        }
+        return (park, others)
+    }
+
+    /// Apps being parked by `parkShown` right now.
+    private var parking: Set<pid_t> = []
+
+    /// Parks (minimizes) these windows of an app that stays shown. The app is hidden
+    /// meanwhile so the minimize animation doesn't play; the workspace the windows belong to
+    /// brings them back (see `showWholeWorkspace`).
+    private func parkShown(_ app: NSRunningApplication, _ windows: [(AXUIElement, CGWindowID)]) {
+        let pid = app.processIdentifier
+        guard !windows.isEmpty, !parking.contains(pid) else { return }
+        parking.insert(pid)
+        if !app.isHidden { app.hide() }
+        func apply(attempt: Int) {
+            if attempt < 15, !app.isHidden, !app.isTerminated {
+                after(0.02) { apply(attempt: attempt + 1) }
+                return
+            }
+            for (w, wid) in windows where AX.set(w, kAXMinimizedAttribute, kCFBooleanTrue) { parked.insert(wid) }
+            saveParked()
+            after(0.03) { [weak self] in
+                app.unhide()
+                self?.parking.remove(pid)
+            }
+        }
+        apply(attempt: 0)
+    }
+
+    /// An app of another workspace came back on its own rather than being brought forward:
+    /// a panel of its (an edge panel, a palette) showed itself, which un-hides the app and
+    /// with it every window it has. Its windows of other workspaces are parked again, and the
+    /// app stays shown along with its panel. ⌘Tab, the Dock and clicks un-hide an app by
+    /// activating it; those are focus changes (`handleFocus`).
+    private func cameBackUnasked(_ app: NSRunningApplication) {
+        guard onlyThisWorkspace, AX.isTrusted, !parking.contains(app.processIdentifier),
+              let id = app.bundleIdentifier, allTabs.contains(where: { $0.bundleID == id }) else { return }
+        // Activation comes along with the un-hide it causes; give it a moment to show.
+        after(0.25) { [weak self] in
+            guard let self, self.pending == nil, !app.isHidden, !app.isTerminated, !app.isActive,
+                  NSWorkspace.shared.frontmostApplication != app, !AX.isFrontmost(app),
+                  !self.shownApps.contains(id) else { return }
+            self.parkShown(app, self.windowsElsewhere(of: app).park)
         }
     }
 
@@ -708,7 +786,7 @@ final class WorkspaceManager: ObservableObject {
             }
         } else {
             // Empty workspace: nothing to show, just put the old set away.
-            for id in leaving { runningApp(id)?.hide() }
+            for id in leaving { if let app = runningApp(id) { putAway(app) } }
         }
     }
 
@@ -805,6 +883,9 @@ final class WorkspaceManager: ObservableObject {
         /// Nothing matches and the tab knows how to reopen its own window, so it must not
         /// grab an unrelated one (background passes only).
         case unmatched
+        /// The tab's window still exists but its AX element can't be reached (yet): the app
+        /// is still un-hiding, or keeps no element for it. Never rebind or reopen then.
+        case outOfReach
     }
 
     /// Restores in flight: windows the app had before (anything else is new) and when to
@@ -819,6 +900,16 @@ final class WorkspaceManager: ObservableObject {
         let windows = AX.windows(pid: pid)
         if let id = tab.windowID, let w = windows.first(where: { AX.windowID($0) == id }) {
             return .window(w)
+        }
+        // AXWindows never lists a window on another Space (native full screen, another
+        // desktop), nor, for some apps, the windows of a hidden app. A window that still
+        // exists and is shown somewhere is still this tab's: reach it by id, and never
+        // re-bind the tab or reopen its window meanwhile (that made a full-screen window's
+        // tab open a duplicate from its recipe). Ordered-out windows belong to no Space and
+        // go on to the usual re-binding.
+        if let id = tab.windowID, isBound(tab), AX.isOnSpace(id) {
+            let w = AX.window(id, pid: pid)
+            return w.map(Resolution.window) ?? .outOfReach
         }
         var claimed = claimedWindowIDs(except: tab.id)
         // A window that appeared during another tab's restore is that tab's: terminals
@@ -876,7 +967,7 @@ final class WorkspaceManager: ObservableObject {
         let onScreen = onlyThisWorkspace ? shownApps
             : Set([currentTab, currentTab.flatMap(partner)].compactMap { $0?.bundleID }).union(appsOnOtherDisplays)
         if !onScreen.contains(tab.bundleID) {
-            runningApp(tab.bundleID)?.hide()
+            if let app = runningApp(tab.bundleID) { putAway(app) }
             return
         }
         if onlyThisWorkspace, let wid = AX.windowID(w), !shownWindowIDs.contains(wid) {
@@ -1158,8 +1249,17 @@ final class WorkspaceManager: ObservableObject {
 
         switch resolve(tab, pid: app.processIdentifier, interactive: attempt >= 0) {
         case .window(let w):
-            // A full-screen window lives in its own Space; leave it alone.
-            if AX.isFullScreen(w) { SwitchCurtain.shared.reveal(); return }
+            // A full-screen window lives in its own Space: don't fit it, but bring it to the
+            // front, which takes the user to its Space.
+            if AX.isFullScreen(w) {
+                app.unhide()
+                if focus, attempt >= 0 {
+                    AX.raise(w)
+                    AX.activate(app)
+                }
+                SwitchCurtain.shared.reveal()
+                return
+            }
             app.unhide()
             if attempt == 0 { watcher.watchClose(w, pid: app.processIdentifier) }
             // Passes: 0 (now), -1 and -2 (follow-ups). Some apps (Chrome) apply a move or
@@ -1204,6 +1304,17 @@ final class WorkspaceManager: ObservableObject {
             guard attempt >= 0, attempt < 40 else { SwitchCurtain.shared.reveal(); return }
             if attempt == 10 { reopen(app) }
             after(0.1) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1, focus: focus) }
+
+        case .outOfReach:
+            // Its app may still be un-hiding: look again for a moment. Failing that, bring the
+            // app forward, which macOS answers by showing a Space with its windows.
+            guard attempt >= 0 else { return }
+            if attempt < 20 {
+                after(0.1) { [weak self] in self?.place(tabID: tabID, token: token, attempt: attempt + 1, focus: focus) }
+            } else {
+                if focus { AX.activate(app) }
+                SwitchCurtain.shared.reveal()
+            }
         }
     }
 
@@ -1638,6 +1749,10 @@ final class WorkspaceManager: ObservableObject {
         nc.addObserver(forName: NSWorkspace.didHideApplicationNotification, object: nil, queue: .main) { [weak self] _ in
             self?.noteFocusHandoff()
         }
+        nc.addObserver(forName: NSWorkspace.didUnhideApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self?.cameBackUnasked(app)
+        }
         // ⌘Tab / Dock switches arrive as app activations; clicks between windows of the
         // same app arrive through the WindowWatcher. Both end up in handleFocus.
         nc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
@@ -1653,6 +1768,10 @@ final class WorkspaceManager: ObservableObject {
     /// `activation`: the app as a whole came forward (⌘Tab, Dock), as opposed to a click
     /// on one of its windows.
     private func handleFocus(pid: pid_t, activation: Bool) {
+        // An app that came forward through a click on its panel (an edge panel, a status
+        // item) was not turned to for its windows, though AX names its main window focused:
+        // don't fit that window, bring another of its windows, or follow it to its workspace.
+        if activation, AX.pointerOnPanel(pid: pid) { return }
         if let p = pending, Date() < p.until {
             // Focus changes during a switch are mostly its own side effects. Keep the last
             // one and look again once the switch is over.
@@ -1706,9 +1825,23 @@ final class WorkspaceManager: ObservableObject {
         guard AX.isTrusted, pid != ProcessInfo.processInfo.processIdentifier,
               let app = NSRunningApplication(processIdentifier: pid), !app.isHidden,
               let bundleID = app.bundleIdentifier else { return }
+        // One of the app's panels has focus. `focusedWindow` would name its main window,
+        // which the user did not turn to: leave things as they are. (⌘Tab and the Dock are
+        // activations, and still bring this workspace's window of the app.)
+        if !activation, AX.focusedIsPanel(pid: pid) { return }
         guard let w = AX.focusedWindow(pid: pid), let wid = AX.windowID(w) else {
             // An app in front without a window (Finder on the desktop): nothing here has focus.
             if !focusOutside, !tabs.contains(where: { $0.bundleID == bundleID }) { focusOutside = true }
+            return
+        }
+        // The user went to a full-screen window's Space (a swipe, Mission Control, ⌃→, ⌘Tab
+        // to its app): that window is in front on its own. Fitting, raising or showing any
+        // other window now (this workspace's window of the app, a caught link, another
+        // workspace's windows) would make macOS switch back to the desktop. Only the
+        // highlight follows.
+        if AX.isFullScreen(w) {
+            if let d = display(ofWindow: wid, w) { focusDisplay(d) }
+            highlightOnly(wid)
             return
         }
         if sideEffects {
@@ -1760,6 +1893,19 @@ final class WorkspaceManager: ObservableObject {
         }
         if !focusOutside { focusOutside = true }
         if follow { followFocus(to: wid, pid: pid) }
+    }
+
+    /// Moves the sidebar highlight to the tab showing this window, or clears it when no tab
+    /// here does. Nothing on screen changes.
+    private func highlightOnly(_ wid: CGWindowID) {
+        guard let tab = tabs.first(where: { $0.windowID == wid }) else {
+            if !focusOutside { focusOutside = true }
+            return
+        }
+        if focusOutside { focusOutside = false }
+        let rep = primary(of: tab)
+        if currentID != rep.id { currentID = rep.id }
+        if currentWorkspace.lastTabID != tab.id { updateCurrent { $0.lastTabID = tab.id } }
     }
 
     /// The focused window is a tab of exactly one other workspace (not shown on another
@@ -2151,7 +2297,7 @@ final class WorkspaceManager: ObservableObject {
         if !vanished.isEmpty {
             let keep = Set(tabs.map(\.bundleID)).union(appsOnOtherDisplays)
             let apps = Set(workspaces.filter { vanished.contains($0.id) }.flatMap { $0.tabs.map(\.bundleID) })
-            for id in apps.subtracting(keep) { runningApp(id)?.hide() }
+            for id in apps.subtracting(keep) { if let app = runningApp(id) { putAway(app) } }
         }
         recomputeActive()
         save()
